@@ -1,0 +1,46 @@
+{
+  "name": "@local/dsh-auv",
+  "version": "0.1.0",
+  "private": true,
+  "description": "DeepSeek Harness plugin that exposes AUV desktop automation (screenshots, OCR, input, windows) as native model tools",
+  "license": "Apache-2.0",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/liliumneko/dsh-auv.git"
+  },
+  "homepage": "https://github.com/liliumneko/dsh-auv#readme",
+  "bugs": {
+    "url": "https://github.com/liliumneko/dsh-auv/issues"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "deepseek",
+    "plugin",
+    "auv",
+    "computer-use",
+    "desktop-automation",
+    "macos"
+  ],
+  "exports": {
+    ".": "./index.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "src",
+    "cordis.patch.yml",
+    "locale",
+    "icon.svg",
+    "README.md",
+    "README.zh.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

@@ -1,0 +1,3 @@
+- insert:
+    - id: dsh-auv
+      name: '@local/dsh-auv'
