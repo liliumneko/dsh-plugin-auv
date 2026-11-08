@@ -7,11 +7,11 @@
   "type": "module",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/liliumneko/dsh-auv.git"
+    "url": "git+https://github.com/liliumneko/dsh-plugin-auv.git"
   },
-  "homepage": "https://github.com/liliumneko/dsh-auv#readme",
+  "homepage": "https://github.com/liliumneko/dsh-plugin-auv#readme",
   "bugs": {
-    "url": "https://github.com/liliumneko/dsh-auv/issues"
+    "url": "https://github.com/liliumneko/dsh-plugin-auv/issues"
   },
   "keywords": [
     "dsh",

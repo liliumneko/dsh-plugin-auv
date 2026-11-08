@@ -81,7 +81,7 @@ to the repository, so cloning and installing needs no build step.
 2. Clone this repository anywhere:
 
    ```sh
-   git clone https://github.com/liliumneko/dsh-auv.git
+   git clone https://github.com/liliumneko/dsh-plugin-auv.git
    ```
 
 3. Install the bundle into the current DSH profile, pointing at the clone:

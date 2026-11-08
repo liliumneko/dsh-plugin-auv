@@ -54,7 +54,7 @@ AUV 相关链接：
 本仓库本身就是插件包目录。运行时产物是已构建好的单文件 `dist/index.mjs`（用 [tsdown](https://tsdown.dev) 打包，无运行时 npm 依赖），已提交到仓库，clone 后安装无需构建。
 
 ```sh
-git clone https://github.com/liliumneko/dsh-auv.git
+git clone https://github.com/liliumneko/dsh-plugin-auv.git
 ```
 
 然后在 DSH 会话中安装到当前 profile（把路径换成你的 clone 路径）：
