@@ -1,30 +1,27 @@
 /**
- * `@auv-js/sdk` transport for @local/dsh-auv.
+ * `@auv-js/sdk` transport for @local/dsh-auv — attach-first, SDK-only.
  *
- * One app-owned `auv serve` daemon (started lazily on the first typed tool
- * call), one `AuvConnection`, and one typed `RunnerClient` serve every SDK
- * tool call. The daemon publishes no discovery descriptor and uses a
- * launcher-token socket, so it never interferes with the user's own
- * `auv serve` / CLI daemon; `--exit-on-stdin-close` makes it follow the Host
- * down even if dispose never runs.
+ * The plugin never invokes the `auv` CLI. On the first tool call it:
+ *
+ *   1. **Attaches** to the user's already-running AUV daemon through
+ *      `connect({ discover: true })` (the discovery descriptor is published by
+ *      `auv serve` / `auv invoke` and accepts any process of the same OS user,
+ *      so no credential is needed). The attempt is bounded by a short timeout.
+ *   2. **Starts its own daemon** with `startAuv()` only when no discoverable
+ *      daemon is reachable. The owned daemon keeps the private socket,
+ *      launcher-token auth, no-discovery-registration and
+ *      exit-on-stdin-close behaviour from the previous design.
+ *
+ * Ownership is tracked so that dispose only stops the daemon the plugin
+ * started: an attached daemon is left running (only the connection is closed).
+ * `auv_doctor`, diagnostics and typed tool values report `attached` vs `owned`.
  *
  * The singleton lives on `globalThis` (symbol key) so a DSH plugin reload can
- * reuse it instead of leaking a daemon; `disposeSdkTransport()` closes the
- * connection and stops the child, and is idempotent.
- *
- * `AUV_DSH_TRANSPORT` (see ./config.mjs) selects the behaviour:
- *   - `cli`: this module never starts a daemon (`activeSdkTransport()` → null).
- *   - `sdk`: daemon startup errors are surfaced to the tool call.
- *   - `auto` (default): one failed startup logs a warning and permanently falls
- *     back to the CLI for this process.
- *
- * `auv_doctor` and `auv_invoke` stay CLI tools by design (the SDK has no
- * doctor report and no generic argv entry point); when this transport owns a
- * daemon they route that CLI child at the same daemon with `AUV_ENDPOINT` +
- * `--credential-stdin`, otherwise the plain CLI path is used.
+ * reuse the connection/daemon instead of leaking one. A transport-level failure
+ * (daemon exited / socket gone) forgets the client so the next tool call can
+ * re-attach or start again.
  */
 
-import { spawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { mkdir, readdir, stat, unlink, writeFile } from 'node:fs/promises'
 import os from 'node:os'
@@ -44,25 +41,18 @@ import {
   InputService,
   MouseButton,
   Position,
+  connect,
   createAuv,
+  discoverEndpoint,
   inputActionProgress,
   invokeUnary,
   startAuv,
 } from '@auv-js/sdk/node'
 
-import {
-  AuvError,
-  childEnvironment,
-  clampTimeout,
-  defaultStoreRoot,
-  permissionHint,
-  resolveAuvBinary,
-  runAuv,
-  runAuvDoctor,
-} from '../auv.mjs'
-import { resolveTransportConfig } from './config.mjs'
+import { AuvError, clampTimeout, permissionHint, resolveAuvBinary } from '../auv.mjs'
 import {
   INPUT_POLICY_VALUES,
+  PERMISSION_RECOMMENDATION,
   activationWarning,
   buildClickOptions,
   buildPressKeysRequest,
@@ -75,33 +65,27 @@ import {
   mapWindowRow,
   messageOf,
   normalizeMessage,
-  parseActivateArgs,
-  parseClickArgs,
-  parseKeysArgs,
-  parseOcrArgs,
-  parseScreenshotArgs,
-  parseScrollArgs,
-  parseTypeArgs,
-  parseWindowsArgs,
+  permissionsAllOk,
+  summarizePermissions,
 } from './sdk-format.mjs'
 
 // ---------------------------------------------------------------------------
-// Paths / environment
+// Constants / paths / environment
 // ---------------------------------------------------------------------------
 
+const RUNNER_CLASS = 'auv.core.local'
 const CAPTURE_MAX_SIZE = 2048
 const CAPTURE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
+const DEFAULT_ATTACH_TIMEOUT_MS = 2_000
 const DEFAULT_STARTUP_TIMEOUT_MS = 15_000
-const DEFAULT_CONNECT_TIMEOUT_MS = 20_000
-const DEFAULT_HEALTH_TIMEOUT_MS = 10_000
-const CLI_STDERR_TAIL = 4_000
-const CLI_STDOUT_TAIL = 2_000
+const DEFAULT_CONNECT_TIMEOUT_MS = 10_000
+const DEFAULT_HEALTH_TIMEOUT_MS = 5_000
 
 function dshHome() {
   return (process.env.DSH_HOME ?? '').trim() || path.join(os.homedir(), '.dsh')
 }
 
-/** Daemon store root: AUV_DSH_SDK_STORE_ROOT, else <DSH data>/auv/sdk. */
+/** Owned-daemon store root: AUV_DSH_SDK_STORE_ROOT, else <DSH data>/auv/sdk. */
 export function sdkStoreRoot() {
   const override = (process.env.AUV_DSH_SDK_STORE_ROOT ?? '').trim()
   return override !== '' ? override : path.join(dshHome(), 'auv', 'sdk')
@@ -113,6 +97,13 @@ export function sdkCaptureRoot() {
   return override !== '' ? override : path.join(dshHome(), 'auv', 'sdk-captures')
 }
 
+/** First line of an error message, for compact diagnostics. */
+function firstLine(text) {
+  const value = typeof text === 'string' ? text : String(text ?? '')
+  const newline = value.indexOf('\n')
+  return newline === -1 ? value : value.slice(0, newline)
+}
+
 function tail(text, limit) {
   const value = typeof text === 'string' ? text : String(text ?? '')
   return value.length <= limit ? value : `…${value.slice(value.length - limit)}`
@@ -122,58 +113,135 @@ function tail(text, limit) {
 // Global singleton state (HMR-safe)
 // ---------------------------------------------------------------------------
 
-const STATE_KEY = Symbol.for('@local/dsh-auv/sdk-transport.v1')
+const STATE_KEY = Symbol.for('@local/dsh-auv/sdk-transport.v2')
 
-function createState() {
+/** Fresh transport state. Exported for the offline self-check. */
+export function createSdkTransportState() {
   return {
-    daemon: null,
     connection: null,
     auv: null,
     runner: null,
+    daemon: null,
+    mode: null,
+    endpoint: null,
+    daemonId: null,
+    pid: null,
     transport: null,
     initPromise: null,
     closing: null,
-    fallback: false,
-    failed: null,
-    warningShown: false,
-    configWarningShown: false,
+    attachAttempted: false,
+    attachError: null,
+    lastError: null,
   }
 }
 
 function getState() {
-  if (globalThis[STATE_KEY] === undefined) globalThis[STATE_KEY] = createState()
+  if (globalThis[STATE_KEY] === undefined) globalThis[STATE_KEY] = createSdkTransportState()
   return globalThis[STATE_KEY]
 }
 
-// ---------------------------------------------------------------------------
-// Init / dispose
-// ---------------------------------------------------------------------------
-
-function wrapInitError(error) {
-  if (error instanceof AuvError) return error
-  const parts = []
-  if (error instanceof AuvDaemonStartError) {
-    parts.push('The AUV SDK could not start its own `auv serve` daemon.')
-    parts.push(messageOf(error))
-    const output = typeof error.output === 'string' ? tail(error.output, 2_000) : ''
-    if (output.trim() !== '') parts.push(`Daemon output (tail):\n${output}`)
-  } else {
-    parts.push(`The AUV SDK transport could not be initialized: ${messageOf(error)}`)
-  }
-  parts.push(
-    'Check that AUV works (`auv --version`), grant macOS Accessibility/Screen Recording to DeepSeek Harness, and retry. Set AUV_DSH_TRANSPORT=cli to use the auv CLI transport instead.',
-  )
-  const message = parts.join('\n')
-  const hint = permissionHint(message)
-  return new AuvError(hint === undefined ? message : `${message}\n${hint}`, { code: 'AUV_SDK_INIT_FAILED' })
+/** Drop the client fields without closing anything (used on transport death). */
+function forgetTransport(shared, reason) {
+  shared.connection = null
+  shared.auv = null
+  shared.runner = null
+  shared.daemon = null
+  shared.mode = null
+  shared.endpoint = null
+  shared.daemonId = null
+  shared.pid = null
+  shared.transport = null
+  if (reason !== undefined) shared.lastError = reason
 }
 
-async function initSdkTransport(shared) {
-  const binaryPath = resolveAuvBinary()
-  const storeRoot = sdkStoreRoot()
-  const daemon = await startAuv({
+// ---------------------------------------------------------------------------
+// Init: attach-first, start-owned fallback
+// ---------------------------------------------------------------------------
+
+/** SDK entry points, overridable by the offline self-check. */
+export const SDK_DEPENDENCIES = Object.freeze({
+  connect,
+  createAuv,
+  startAuv,
+  discoverEndpoint,
+  resolveBinary: resolveAuvBinary,
+})
+
+function adoptTransport(shared, adopted) {
+  shared.connection = adopted.connection
+  shared.auv = adopted.auv
+  shared.runner = adopted.runner
+  shared.daemon = adopted.daemon
+  shared.mode = adopted.mode
+  shared.endpoint = adopted.endpoint
+  shared.daemonId = adopted.daemonId
+  shared.pid = adopted.pid
+  shared.lastError = null
+  const facade = createFacade(shared)
+  shared.transport = facade
+  if (adopted.daemon !== null) {
+    // An owned daemon exiting must drop our client so the next call can start
+    // (or attach to) a fresh one. The daemon handle itself is not ours to stop.
+    const drop = () => {
+      if (shared.daemon !== adopted.daemon) return
+      forgetTransport(shared, 'The AUV daemon exited.')
+    }
+    adopted.daemon.exited.then(drop, drop)
+  }
+  return facade
+}
+
+/**
+ * Try `connect({ discover: true })`: attach to the user's registered daemon.
+ * Returns the facade on success or null when nothing discoverable is reachable.
+ */
+async function tryAttach(shared, deps) {
+  let connection
+  try {
+    let endpoint = null
+    if (typeof deps.discoverEndpoint === 'function') {
+      try {
+        const discovered = await deps.discoverEndpoint()
+        if (discovered !== null && typeof discovered?.endpoint === 'string') endpoint = discovered.endpoint
+      } catch {
+        /* discovery failures resurface through connect() below */
+      }
+    }
+    connection = await deps.connect({ discover: true, signal: AbortSignal.timeout(DEFAULT_ATTACH_TIMEOUT_MS) })
+    const auv = deps.createAuv(connection)
+    const health = await auv.health.check({ signal: AbortSignal.timeout(DEFAULT_HEALTH_TIMEOUT_MS) })
+    const runner = auv.runner({ runnerClass: RUNNER_CLASS })
+    shared.attachError = null
+    void pruneCaptures().catch(() => {})
+    return adoptTransport(shared, {
+      mode: 'attached',
+      connection,
+      auv,
+      runner,
+      daemon: null,
+      endpoint,
+      daemonId: typeof health?.id === 'string' ? health.id : null,
+      pid: null,
+    })
+  } catch (error) {
+    if (connection !== null && connection !== undefined) {
+      try {
+        await connection.close()
+      } catch {
+        /* ignore */
+      }
+    }
+    shared.attachError = firstLine(messageOf(error))
+    return null
+  }
+}
+
+/** Start the plugin-owned private daemon (no discovery registration). */
+async function startOwnedDaemon(shared, deps) {
+  const binaryPath = deps.resolveBinary()
+  const daemon = await deps.startAuv({
     binaryPath,
-    storeRoot,
+    storeRoot: sdkStoreRoot(),
     workingDirectory: os.homedir(),
     environment: { ...process.env },
     startupTimeoutMs: DEFAULT_STARTUP_TIMEOUT_MS,
@@ -182,39 +250,28 @@ async function initSdkTransport(shared) {
   let connection
   try {
     connection = await daemon.connect({ signal: AbortSignal.timeout(DEFAULT_CONNECT_TIMEOUT_MS) })
-    const auv = createAuv(connection)
+    const auv = deps.createAuv(connection)
     const health = await auv.health.check({ signal: AbortSignal.timeout(DEFAULT_HEALTH_TIMEOUT_MS) })
     if (health?.id !== daemon.id) {
       throw new AuvConfigurationError(
         `AUV SDK health check returned daemon "${health?.id ?? 'unknown'}", expected "${daemon.id}".`,
       )
     }
-    const runner = auv.runner({ runnerClass: 'auv.core.local' })
-    shared.daemon = daemon
-    shared.connection = connection
-    shared.auv = auv
-    shared.runner = runner
-    shared.failed = null
-    shared.fallback = false
-
-    // Drop the client if the daemon dies; the next call starts a fresh one.
-    const drop = () => {
-      if (shared.daemon !== daemon) return
-      shared.daemon = null
-      shared.connection = null
-      shared.auv = null
-      shared.runner = null
-      shared.transport = null
-    }
-    daemon.exited.then(drop, drop)
-
-    // Captures are transient; trim stale ones in the background.
+    const runner = auv.runner({ runnerClass: RUNNER_CLASS })
     void pruneCaptures().catch(() => {})
-
-    return createFacade(daemon, connection, auv, runner)
+    return adoptTransport(shared, {
+      mode: 'owned',
+      connection,
+      auv,
+      runner,
+      daemon,
+      endpoint: daemon.connectionOptions?.endpoint ?? null,
+      daemonId: daemon.id,
+      pid: daemon.pid ?? null,
+    })
   } catch (error) {
     try {
-      if (connection !== undefined) await connection.close()
+      if (connection !== null && connection !== undefined) await connection.close()
     } catch {
       /* ignore */
     }
@@ -223,35 +280,70 @@ async function initSdkTransport(shared) {
     } catch {
       /* ignore */
     }
-    throw wrapInitError(error)
+    throw error
   }
 }
 
-function warnFallback(error) {
-  const shared = getState()
-  if (shared.warningShown) return
-  shared.warningShown = true
-  const firstLine = messageOf(error).split('\n')[0]
-  console.warn(
-    `[dsh-auv] @auv-js/sdk transport unavailable (${firstLine}). Falling back to the auv CLI for this process; set AUV_DSH_TRANSPORT=sdk to require the SDK or =cli to silence this.`,
+/** Wrap a raw SDK init failure into the tool-facing `AuvError`. */
+function wrapInitError(shared, error) {
+  if (error instanceof AuvError) {
+    if (shared.attachError === null) return error
+    return new AuvError(
+      `${error.message}\n\nNo running AUV daemon was found to attach to (${shared.attachError}).`,
+      { code: error.code },
+    )
+  }
+  const parts = []
+  if (error instanceof AuvDaemonStartError) {
+    parts.push('The AUV SDK could not start its own `auv serve` daemon and no running daemon was discovered.')
+    parts.push(messageOf(error))
+    const output = typeof error.output === 'string' ? tail(error.output, 2_000) : ''
+    if (output.trim() !== '') parts.push(`Daemon output (tail):\n${output}`)
+  } else {
+    parts.push(`The AUV SDK transport could not be initialized: ${messageOf(error)}`)
+  }
+  if (shared.attachError !== null) parts.push(`Attach attempt: ${shared.attachError}`)
+  parts.push(
+    'Install AUV (or start it with `auv serve`), grant macOS Accessibility/Screen Recording to DeepSeek Harness, then retry. Run auv_doctor for a diagnostic report.',
   )
+  const message = parts.join('\n')
+  const hint = permissionHint(message)
+  return new AuvError(hint === undefined ? message : `${message}\n${hint}`, { code: 'AUV_SDK_INIT_FAILED' })
+}
+
+/**
+ * Initialize the SDK transport for a state object.
+ *
+ * Exported for the offline self-check (`tools/check-tools.mjs`) so the
+ * attach/owned decision and dispose ownership can be unit-tested with injected
+ * `connect`/`startAuv`/`createAuv` implementations.
+ *
+ * @param {object} shared state created by createSdkTransportState()
+ * @param {object} [deps] SDK_DEPENDENCIES-shaped dependency set
+ */
+export async function initializeSdkTransport(shared, deps = SDK_DEPENDENCIES) {
+  shared.attachAttempted = true
+  const attached = await tryAttach(shared, deps)
+  if (attached !== null) return attached
+  try {
+    return await startOwnedDaemon(shared, deps)
+  } catch (error) {
+    throw wrapInitError(shared, error)
+  }
 }
 
 /**
  * Ensure the SDK transport is initialized and return its facade.
  *
- * @returns {Promise<object|null>} facade, or null when the CLI path must be used
- * @throws {AuvError} in `AUV_DSH_TRANSPORT=sdk` mode when initialization fails
+ * Attaches to a discoverable AUV daemon first; starts a plugin-owned daemon only
+ * when nothing is reachable. Init failures surface as `AuvError` (with install
+ * guidance when AUV is missing); the next call retries.
+ *
+ * @returns {Promise<object>} facade
+ * @throws {AuvError} when neither attach nor the owned daemon can start
  */
-export async function activeSdkTransport() {
-  const config = resolveTransportConfig()
-  if (config.mode === 'cli') return null
+export async function ensureSdkTransport() {
   const shared = getState()
-
-  if (config.warning !== null && !shared.configWarningShown) {
-    shared.configWarningShown = true
-    console.warn(`[dsh-auv] ${config.warning}`)
-  }
   if (shared.closing !== null) {
     try {
       await shared.closing
@@ -259,50 +351,48 @@ export async function activeSdkTransport() {
       /* ignore */
     }
   }
-  if (shared.transport !== null) {
-    if (shared.fallback) return null
-    return shared.transport
-  }
-  if (shared.failed !== null) {
-    if (config.mode === 'sdk') throw shared.failed
-    return null
-  }
-  if (shared.fallback) return null
-
+  if (shared.transport !== null) return shared.transport
   if (shared.initPromise === null) {
-    const mode = config.mode
-    shared.initPromise = initSdkTransport(shared)
-      .then((transport) => {
-        shared.transport = transport
-        return transport
-      })
-      .catch((error) => {
-        const wrapped = wrapInitError(error)
+    shared.initPromise = initializeSdkTransport(shared, SDK_DEPENDENCIES).then(
+      (facade) => {
         shared.initPromise = null
-        if (mode === 'sdk') {
-          shared.failed = wrapped
-          throw wrapped
-        }
-        shared.fallback = true
-        shared.failed = wrapped
-        warnFallback(wrapped)
-        return null
-      })
+        return facade
+      },
+      (error) => {
+        shared.initPromise = null
+        const wrapped = error instanceof AuvError ? error : wrapInitError(shared, error)
+        shared.lastError = firstLine(wrapped.message)
+        throw wrapped
+      },
+    )
   }
   return await shared.initPromise
 }
 
-/** Return the started SDK facade without initializing anything, or null. */
+/** Tool-facing alias: ensure the transport (attach first) and return the facade. */
+export async function activeSdkTransport() {
+  return await ensureSdkTransport()
+}
+
+/** Return the started facade without initializing anything, or null. */
 export function sdkTransportIfStarted() {
   const shared = globalThis[STATE_KEY]
   if (shared === undefined) return null
   return shared.transport ?? null
 }
 
-/** Crash/reload-safe teardown: close the connection and stop the owned daemon. */
+/**
+ * Tear the transport down: close the connection always; stop the daemon only
+ * when this plugin started (owns) it. Idempotent.
+ */
 export async function disposeSdkTransport() {
   const shared = globalThis[STATE_KEY]
   if (shared === undefined) return
+  await disposeTransportState(shared)
+}
+
+/** Dispose a specific transport state object. Exported for the offline self-check. */
+export async function disposeTransportState(shared) {
   if (shared.closing !== null) {
     try {
       await shared.closing
@@ -312,25 +402,20 @@ export async function disposeSdkTransport() {
     return
   }
   shared.closing = (async () => {
-    const pending = shared.initPromise
-    if (pending !== null) {
+    if (shared.initPromise !== null) {
       try {
-        await pending
+        await shared.initPromise
       } catch {
         /* an init failure has nothing to clean up */
       }
     }
-    const daemon = shared.daemon
     const connection = shared.connection
-    shared.daemon = null
-    shared.connection = null
-    shared.auv = null
-    shared.runner = null
-    shared.transport = null
+    const daemon = shared.mode === 'owned' ? shared.daemon : null
+    forgetTransport(shared)
     shared.initPromise = null
-    shared.failed = null
-    shared.fallback = false
-    shared.warningShown = false
+    shared.attachAttempted = false
+    shared.attachError = null
+    shared.lastError = null
     if (connection !== null) {
       try {
         await connection.close()
@@ -356,25 +441,24 @@ export async function disposeSdkTransport() {
 /**
  * Diagnostic snapshot for `auv_doctor`-style reporting and offline checks.
  *
- * @returns {{mode: 'auto'|'sdk'|'cli', started: boolean, daemonId: string|null, pid: number|null,
- *            endpoint: string|null, storeRoot: string, captureRoot: string, fallback: boolean,
- *            failed: boolean, error: string|null}}
+ * @returns {{started: boolean, mode: 'attached'|'owned'|null, endpoint: string|null,
+ *            daemonId: string|null, pid: number|null, attachAttempted: boolean,
+ *            attachError: string|null, lastError: string|null,
+ *            storeRoot: string, captureRoot: string}}
  */
 export function sdkTransportStatus() {
-  const config = resolveTransportConfig()
   const shared = globalThis[STATE_KEY]
-  const daemon = shared?.daemon ?? null
   return {
-    mode: config.mode,
     started: shared?.transport != null,
-    daemonId: daemon?.id ?? null,
-    pid: daemon?.pid ?? null,
-    endpoint: daemon?.connectionOptions?.endpoint ?? null,
+    mode: shared?.mode ?? null,
+    endpoint: shared?.endpoint ?? null,
+    daemonId: shared?.daemonId ?? null,
+    pid: shared?.pid ?? null,
+    attachAttempted: shared?.attachAttempted === true,
+    attachError: shared?.attachError ?? null,
+    lastError: shared?.lastError ?? null,
     storeRoot: sdkStoreRoot(),
     captureRoot: sdkCaptureRoot(),
-    fallback: shared?.fallback === true,
-    failed: shared?.failed != null,
-    error: shared?.failed != null ? messageOf(shared.failed).split('\n')[0] : null,
   }
 }
 
@@ -457,6 +541,10 @@ function beginCall(execSignal, timeoutMs) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Error mapping
+// ---------------------------------------------------------------------------
+
 const RPC_NAME_HINTS = {
   3: { name: 'INVALID_ARGUMENT', code: 'AUV_INVALID_ARGUMENT' },
   5: {
@@ -472,7 +560,7 @@ const RPC_NAME_HINTS = {
   9: {
     name: 'FAILED_PRECONDITION',
     code: 'AUV_FAILED_PRECONDITION',
-    hint: 'The target window may be minimized or full screen. Restore it first (auv_invoke window.setState, or auv_activate).',
+    hint: 'The target window may be minimized or full screen. Restore or focus it first (for example with auv_windows to find a visible window, then auv_activate).',
   },
   10: { name: 'ABORTED', code: 'ABORTED' },
   12: {
@@ -488,7 +576,7 @@ const RPC_NAME_HINTS = {
   14: {
     name: 'UNAVAILABLE',
     code: 'AUV_UNAVAILABLE',
-    hint: 'The AUV SDK daemon may have stopped; the next tool call starts a fresh one. Run auv_doctor if this persists.',
+    hint: 'The AUV daemon may have stopped. The next tool call attaches to a running daemon or starts one again; run auv_doctor if this persists.',
   },
 }
 
@@ -504,7 +592,40 @@ function inputProgressHint(error) {
   }
 }
 
-/** Map an SDK error into the tool-facing `AuvError` (same shape as CLI errors). */
+/** Whether an SDK error means the daemon/connection itself is gone. */
+function isDeadTransport(error) {
+  if (error instanceof AuvTransportError) return true
+  if (error instanceof AuvProtocolError) return true
+  if (error instanceof AuvRemoteError) return true
+  if (error instanceof AuvRpcError) return error.rpcCode === 14
+  return false
+}
+
+/**
+ * Forget a dead client so the next tool call re-attaches or starts a daemon.
+ * Only when the transport that failed is still the active one.
+ */
+function invalidateDeadTransport(context, message) {
+  const shared = context.shared
+  if (shared.runner !== context.runner) return
+  const connection = shared.connection
+  const daemon = shared.mode === 'owned' ? shared.daemon : null
+  forgetTransport(shared, firstLine(message))
+  if (connection !== null) {
+    void connection.close().catch(() => {})
+  }
+  if (daemon !== null) {
+    void daemon.stop().catch(() => {})
+  }
+}
+
+/** Map an SDK error into the tool-facing `AuvError`, dropping dead transports. */
+function fail(context, error, operation, call) {
+  const mapped = mapSdkError(error, operation, call)
+  if (isDeadTransport(error)) invalidateDeadTransport(context, mapped.message)
+  return mapped
+}
+
 function mapSdkError(error, operation, call) {
   if (error instanceof AuvError) return error
   if (error instanceof AuvAbortError || error?.name === 'AuvAbortError') {
@@ -548,18 +669,25 @@ function inputPolicyValue(policy) {
 
 const MOUSE_BUTTONS = { left: MouseButton.LEFT, right: MouseButton.RIGHT, middle: MouseButton.MIDDLE }
 
-function completedValue(commandId, extra = {}) {
-  return { run_id: null, command_id: commandId, status: 'completed', ...extra }
+/** Standard completed tool value, annotated with daemon ownership diagnostics. */
+function completedValue(context, commandId, extra = {}) {
+  return {
+    run_id: null,
+    command_id: commandId,
+    status: 'completed',
+    daemon_mode: context.mode,
+    daemon_endpoint: context.endpoint,
+    ...extra,
+  }
 }
 
-async function resolveWindowClient(runner, plan, signal) {
-  if (plan.windowId !== undefined) return await runner.windows.get(plan.windowId, { signal })
-  if (plan.applicationId !== undefined) return await runner.windows.resolve({ applicationId: plan.applicationId }, { signal })
+async function resolveWindowClient(context, plan, signal) {
+  if (plan.windowId !== undefined) return await context.runner.windows.get(plan.windowId, { signal })
+  if (plan.applicationId !== undefined) return await context.runner.windows.resolve({ applicationId: plan.applicationId }, { signal })
   return null
 }
 
-async function screenshot(context, rawArgs, exec, timeoutMs) {
-  const plan = parseScreenshotArgs(rawArgs)
+async function screenshot(context, plan, exec, timeoutMs) {
   const call = beginCall(exec?.signal, timeoutMs)
   try {
     const warnings = []
@@ -569,7 +697,7 @@ async function screenshot(context, rawArgs, exec, timeoutMs) {
       if (plan.applicationId !== undefined) {
         warnings.push("Capturing the application's main visible window; pass window_id to choose a specific window.")
       }
-      const client = await resolveWindowClient(context.runner, plan, call.signal)
+      const client = await resolveWindowClient(context, plan, call.signal)
       response = await client.capture({ resolution: CaptureResolution.LOGICAL, signal: call.signal })
       commandId = 'window.capture'
     } else if (plan.displayId !== undefined) {
@@ -606,7 +734,7 @@ async function screenshot(context, rawArgs, exec, timeoutMs) {
       result.window = mapWindowRow(response.window, response.window.ref?.windowId)
     }
     if (response.display !== undefined && response.display !== null) result.display = mapDisplay(response.display)
-    return completedValue(commandId, {
+    return completedValue(context, commandId, {
       artifact_path: artifactPath,
       content_type: 'image/webp',
       width: image.width,
@@ -616,7 +744,7 @@ async function screenshot(context, rawArgs, exec, timeoutMs) {
       warnings,
     })
   } catch (error) {
-    throw mapSdkError(error, 'screenshot', call)
+    throw fail(context, error, 'screenshot', call)
   }
 }
 
@@ -642,13 +770,12 @@ function sleep(ms, signal) {
   })
 }
 
-async function ocr(context, rawArgs, exec, timeoutMs) {
-  const plan = parseOcrArgs(rawArgs)
+async function ocr(context, plan, exec, timeoutMs) {
   const call = beginCall(exec?.signal, timeoutMs)
   const windowed = plan.windowId !== undefined || plan.applicationId !== undefined
   const commandId = windowed ? (plan.wait ? 'window.waitForText' : 'window.findText') : plan.wait ? 'display.waitForText' : 'display.findText'
   try {
-    const client = await resolveWindowClient(context.runner, plan, call.signal)
+    const client = await resolveWindowClient(context, plan, call.signal)
     const findOnce = async () => {
       const options = { signal: call.signal }
       if (client !== null) return await client.findText(plan.text, options)
@@ -671,14 +798,13 @@ async function ocr(context, rawArgs, exec, timeoutMs) {
     if (response.window !== undefined && response.window !== null) {
       result.window = mapWindowRow(response.window, response.window.ref?.windowId)
     }
-    return completedValue(commandId, { result, warnings: [], timed_out: timedOut })
+    return completedValue(context, commandId, { result, warnings: [], timed_out: timedOut })
   } catch (error) {
-    throw mapSdkError(error, 'ocr', call)
+    throw fail(context, error, 'ocr', call)
   }
 }
 
-async function click(context, rawArgs, exec, timeoutMs) {
-  const plan = parseClickArgs(rawArgs)
+async function click(context, plan, exec, timeoutMs) {
   const call = beginCall(exec?.signal, timeoutMs)
   const warnings = []
   try {
@@ -687,15 +813,15 @@ async function click(context, rawArgs, exec, timeoutMs) {
       const commandId = windowed ? 'window.clickText' : 'display.clickText'
       const target = formatTargetString(plan)
       if (windowed) {
-        const client = await resolveWindowClient(context.runner, plan, call.signal)
+        const client = await resolveWindowClient(context, plan, call.signal)
         const found = await client.findText(plan.text, { signal: call.signal })
         const matches = mapTextMatches(found.matches)
         if (matches.length === 0) {
           warnings.push(`No visible text matched "${plan.text}"; nothing was clicked.`)
-          return completedValue(commandId, { target, result: { matches, click: null }, warnings })
+          return completedValue(context, commandId, { target, result: { matches, click: null }, warnings })
         }
         const response = await client.click({ bounds: found.matches[0].bounds }, undefined, { signal: call.signal })
-        return completedValue(commandId, { target, result: { matches, click: normalizeMessage(response) }, warnings })
+        return completedValue(context, commandId, { target, result: { matches, click: normalizeMessage(response) }, warnings })
       }
       const findOptions = { signal: call.signal }
       if (plan.within !== undefined) {
@@ -710,10 +836,10 @@ async function click(context, rawArgs, exec, timeoutMs) {
       const matches = mapTextMatches(found.matches)
       if (matches.length === 0) {
         warnings.push(`No visible text matched "${plan.text}"; nothing was clicked.`)
-        return completedValue(commandId, { target, result: { matches, click: null }, warnings })
+        return completedValue(context, commandId, { target, result: { matches, click: null }, warnings })
       }
       const response = await context.runner.input.click({ bounds: found.matches[0].bounds }, undefined, { signal: call.signal })
-      return completedValue(commandId, { target, result: { matches, click: normalizeMessage(response) }, warnings })
+      return completedValue(context, commandId, { target, result: { matches, click: normalizeMessage(response) }, warnings })
     }
 
     const commandId = 'input.clickPoint'
@@ -724,16 +850,16 @@ async function click(context, rawArgs, exec, timeoutMs) {
     })
     let response
     if (plan.windowId !== undefined || plan.applicationId !== undefined) {
-      const client = await resolveWindowClient(context.runner, plan, call.signal)
+      const client = await resolveWindowClient(context, plan, call.signal)
       response = await client.click({ x: plan.x, y: plan.y }, clickOptions, { signal: call.signal })
     } else if (plan.displayId !== undefined) {
       response = await context.runner.input.click(Position.display(plan.displayId, plan.x, plan.y), clickOptions, { signal: call.signal })
     } else {
       response = await context.runner.input.click(Position.screen(plan.x, plan.y), clickOptions, { signal: call.signal })
     }
-    return completedValue(commandId, { target, result: normalizeMessage(response), warnings })
+    return completedValue(context, commandId, { target, result: normalizeMessage(response), warnings })
   } catch (error) {
-    throw mapSdkError(error, 'click', call)
+    throw fail(context, error, 'click', call)
   }
 }
 
@@ -745,13 +871,12 @@ function applicationRecipient(applicationId) {
   return { recipient: { case: 'applicationId', value: applicationId } }
 }
 
-async function type(context, rawArgs, exec, timeoutMs) {
-  const plan = parseTypeArgs(rawArgs)
+async function type(context, plan, exec, timeoutMs) {
   const call = beginCall(exec?.signal, timeoutMs)
   const commandId = plan.mode === 'paste' ? 'input.pasteText' : 'input.typeText'
   const policy = inputPolicyValue(plan.policy)
   try {
-    const client = await resolveWindowClient(context.runner, plan, call.signal)
+    const client = await resolveWindowClient(context, plan, call.signal)
     let response
     if (client !== null) {
       response =
@@ -786,17 +911,16 @@ async function type(context, rawArgs, exec, timeoutMs) {
     } else {
       response = await context.runner.input.typeText(plan.text, policy === undefined ? {} : { policy }, { signal: call.signal })
     }
-    return completedValue(commandId, { target: formatTargetString(plan), result: normalizeMessage(response), warnings: [] })
+    return completedValue(context, commandId, { target: formatTargetString(plan), result: normalizeMessage(response), warnings: [] })
   } catch (error) {
-    throw mapSdkError(error, 'type', call)
+    throw fail(context, error, 'type', call)
   }
 }
 
-async function keys(context, rawArgs, exec, timeoutMs) {
-  const plan = parseKeysArgs(rawArgs)
+async function keys(context, plan, exec, timeoutMs) {
   const call = beginCall(exec?.signal, timeoutMs)
   try {
-    const client = await resolveWindowClient(context.runner, plan, call.signal)
+    const client = await resolveWindowClient(context, plan, call.signal)
     let response
     if (client !== null) {
       response = await client.pressKeys(plan.keys, {
@@ -814,14 +938,13 @@ async function keys(context, rawArgs, exec, timeoutMs) {
       })
       response = await context.runner.input.pressKeys(request, { signal: call.signal })
     }
-    return completedValue('input.pressKeys', { target: formatTargetString(plan), result: normalizeMessage(response), warnings: [] })
+    return completedValue(context, 'input.pressKeys', { target: formatTargetString(plan), result: normalizeMessage(response), warnings: [] })
   } catch (error) {
-    throw mapSdkError(error, 'keys', call)
+    throw fail(context, error, 'keys', call)
   }
 }
 
-async function scroll(context, rawArgs, exec, timeoutMs) {
-  const plan = parseScrollArgs(rawArgs)
+async function scroll(context, plan, exec, timeoutMs) {
   const call = beginCall(exec?.signal, timeoutMs)
   try {
     if (plan.windowId !== undefined) {
@@ -846,7 +969,7 @@ async function scroll(context, rawArgs, exec, timeoutMs) {
         undefined,
         { signal: call.signal },
       )
-      return completedValue('window.scroll', { result: normalizeMessage(response), warnings: [] })
+      return completedValue(context, 'window.scroll', { result: normalizeMessage(response), warnings: [] })
     }
 
     if (process.platform === 'darwin') {
@@ -860,17 +983,16 @@ async function scroll(context, rawArgs, exec, timeoutMs) {
       input: InputService.method.scrollPoint.input,
       output: InputService.method.scrollPoint.output,
       request: { position: Position.screen(plan.x, plan.y), scroll: { deltaX: plan.dx ?? 0, deltaY: plan.dy } },
-      runnerClass: 'auv.core.local',
+      runnerClass: RUNNER_CLASS,
       signal: call.signal,
     })
-    return completedValue('input.scrollPoint', { result: normalizeMessage(response), warnings: [] })
+    return completedValue(context, 'input.scrollPoint', { result: normalizeMessage(response), warnings: [] })
   } catch (error) {
-    throw mapSdkError(error, 'scroll', call)
+    throw fail(context, error, 'scroll', call)
   }
 }
 
-async function windows(context, rawArgs, exec, timeoutMs) {
-  const plan = parseWindowsArgs(rawArgs)
+async function windows(context, plan, exec, timeoutMs) {
   const call = beginCall(exec?.signal, timeoutMs)
   try {
     const clients = await context.runner.windows.list({
@@ -878,253 +1000,120 @@ async function windows(context, rawArgs, exec, timeoutMs) {
       excludeOtherDesktops: !plan.includeOtherDesktops,
       signal: call.signal,
     })
-    return completedValue('window.list', {
+    return completedValue(context, 'window.list', {
       windows: clients.map((client) => mapWindowRow(client.window, client.id)),
       warnings: [],
     })
   } catch (error) {
-    throw mapSdkError(error, 'windows', call)
+    throw fail(context, error, 'windows', call)
   }
 }
 
-async function activate(context, rawArgs, exec, timeoutMs) {
-  const plan = parseActivateArgs(rawArgs)
+async function activate(context, plan, exec, timeoutMs) {
   const call = beginCall(exec?.signal, timeoutMs)
   try {
     const response = await context.runner.applications.activate({ applicationId: plan.applicationId }, { signal: call.signal })
     const warnings = []
     const warning = activationWarning(response)
     if (warning !== null) warnings.push(warning)
-    return completedValue('application.activate', {
+    return completedValue(context, 'application.activate', {
       target: `app:${plan.applicationId}`,
       result: mapActivateResult(response),
       warnings,
     })
   } catch (error) {
-    throw mapSdkError(error, 'activate', call)
+    throw fail(context, error, 'activate', call)
   }
 }
 
-// ---------------------------------------------------------------------------
-// CLI child process routed at the owned daemon (auv_doctor / auv_invoke)
-// ---------------------------------------------------------------------------
-
-function receiptFailure(receipt) {
-  const details = receipt?.failure_details ?? {}
-  const summary = typeof receipt?.failure === 'string' && receipt.failure !== '' ? receipt.failure : (typeof details.message === 'string' ? details.message : 'unknown failure')
-  const code = typeof details.code === 'string' ? details.code : 'AUV_COMMAND_FAILED'
-  let message = `AUV command "${receipt?.command_id ?? 'unknown'}" failed: ${summary} (${code})`
-  if (typeof details.message === 'string' && details.message !== '' && details.message !== summary) message += `\n${details.message}`
-  const hint = permissionHint(`${summary}\n${details.message ?? ''}`)
-  if (hint !== undefined) message += `\n${hint}`
-  return new AuvError(message, { code, receipt })
-}
-
 /**
- * Spawn the auv CLI talking to this transport's daemon.
- *
- * The launcher token goes on stdin (`--credential-stdin`), never into argv or
- * the environment; `AUV_ENDPOINT` selects our private socket.
+ * SDK-backed `auv_doctor`: platform, daemon ownership/endpoint/health, and the
+ * macOS permission probe. Never throws: probe failures become report fields.
  */
-function spawnOwnedDaemonCli(context, { args, signal, timeoutMs }) {
-  const credential = context.daemon.connectionOptions?.credential
-  const endpoint = context.daemon.connectionOptions?.endpoint
-  const binary = resolveAuvBinary()
-  const effectiveTimeout = clampTimeout(timeoutMs)
-
-  return new Promise((resolve, reject) => {
-    let child
-    try {
-      child = spawn(binary, args, {
-        stdio: ['pipe', 'pipe', 'pipe'],
-        env: { ...childEnvironment(), AUV_ENDPOINT: String(endpoint) },
-        windowsHide: true,
-      })
-    } catch (error) {
-      reject(new AuvError(`Failed to start AUV (${binary}): ${messageOf(error)}`, { code: 'AUV_SPAWN_ERROR' }))
-      return
+async function doctor(context, exec, timeoutMs) {
+  const call = beginCall(exec?.signal, timeoutMs)
+  const report = {
+    platform: process.platform,
+    daemon: {
+      mode: context.mode,
+      endpoint: context.endpoint,
+      daemon_id: context.daemonId,
+      pid: context.pid,
+      health: 'unknown',
+    },
+    permissions_checked: false,
+    accessibility: null,
+    screen_recording: null,
+    screen_capture_kit: null,
+    automation: null,
+    all_ok: false,
+    recommendation: null,
+    error: null,
+    warnings: [],
+  }
+  try {
+    const health = await context.auv.health.check({ signal: call.signal })
+    report.daemon.health = typeof health?.status === 'string' ? health.status : 'unknown'
+    if (process.platform !== 'darwin') {
+      report.all_ok = true
+      report.warnings.push('Permission checks are macOS-only; the AUV daemon is reachable on this platform.')
+      return report
     }
-
-    let stdout = ''
-    let stderr = ''
-    let settled = false
-    let timer
-    const finish = (handler, value) => {
-      if (settled) return
-      settled = true
-      if (timer !== undefined) clearTimeout(timer)
-      if (signal !== undefined) signal.removeEventListener('abort', onAbort)
-      handler(value)
+    const probe = await context.runner.macos.permissions.probe({ signal: call.signal })
+    const permissions = summarizePermissions(probe)
+    if (permissions === null) {
+      report.error = 'AUV returned no permission status.'
+      report.recommendation = PERMISSION_RECOMMENDATION
+      return report
     }
-    const kill = () => {
-      try {
-        child.kill('SIGKILL')
-      } catch {
-        /* already exited */
-      }
+    report.permissions_checked = true
+    report.accessibility = permissions.accessibility
+    report.screen_recording = permissions.screen_recording
+    report.screen_capture_kit = permissions.screen_capture_kit
+    report.automation = permissions.automation
+    report.all_ok = permissionsAllOk(permissions)
+    if (!report.all_ok) report.recommendation = PERMISSION_RECOMMENDATION
+    if (permissions.automation === 'missing') {
+      report.warnings.push('Automation to System Events is missing; some apps may refuse AppleScript activation.')
     }
-    const onAbort = () => {
-      kill()
-      finish(reject, new AuvError('AUV call was aborted.', { code: 'ABORTED' }))
-    }
-
-    child.stdout.setEncoding('utf8')
-    child.stderr.setEncoding('utf8')
-    child.stdout.on('data', (chunk) => {
-      if (stdout.length < 8 * 1024 * 1024) stdout += chunk
-    })
-    child.stderr.on('data', (chunk) => {
-      stderr = tail(`${stderr}${chunk}`, CLI_STDERR_TAIL)
-    })
-    child.stdin.on('error', () => {
-      /* the CLI may close stdin before we finish writing */
-    })
-    child.on('error', (error) => {
-      finish(reject, new AuvError(`Failed to run AUV (${binary}): ${messageOf(error)}. Install AUV or set AUV_BIN.`, { code: 'AUV_SPAWN_ERROR', stderr }))
-    })
-    child.on('close', (code, signalName) => {
-      if (settled) return
-      const text = stdout.trim()
-      if (text !== '') {
-        let parsed
-        try {
-          parsed = JSON.parse(text)
-        } catch {
-          parsed = undefined
-        }
-        if (parsed !== undefined && parsed !== null && typeof parsed === 'object') {
-          if (typeof parsed.status === 'string' && parsed.status === 'failed') {
-            finish(reject, receiptFailure(parsed))
-            return
-          }
-          finish(resolve, parsed)
-          return
-        }
-      }
-      const stderrTail = tail(stderr, CLI_STDERR_TAIL)
-      const stdoutTail = tail(stdout, CLI_STDOUT_TAIL)
-      let message = `AUV exited with code ${code ?? 'unknown'}${signalName === null || signalName === undefined ? '' : ` (signal ${signalName})`}`
-      if (stderrTail !== '') message += `\nstderr: ${stderrTail}`
-      if (stdoutTail !== '') message += `\nstdout: ${stdoutTail}`
-      const hint = permissionHint(`${stderrTail}\n${stdoutTail}`)
-      if (hint !== undefined) message += `\n${hint}`
-      finish(reject, new AuvError(message, { code: 'AUV_CLI_ERROR', stderr, stdout }))
-    })
-    if (signal !== undefined) {
-      if (signal.aborted) {
-        onAbort()
-        return
-      }
-      signal.addEventListener('abort', onAbort, { once: true })
-    }
-    timer = setTimeout(() => {
-      kill()
-      finish(reject, new AuvError(`AUV timed out after ${effectiveTimeout} ms.`, { code: 'AUV_TIMEOUT', stderr }))
-    }, effectiveTimeout)
-
-    try {
-      child.stdin.write(`${credential ?? ''}\n`)
-      child.stdin.end()
-    } catch {
-      /* handled by the close/error paths */
-    }
-  })
-}
-
-function isCliConnectionFailure(error) {
-  if (!(error instanceof AuvError)) return false
-  if (error.code === 'AUV_SPAWN_ERROR') return true
-  if (error.code !== 'AUV_CLI_ERROR') return false
-  const text = `${error.message ?? ''}\n${error.stderr ?? ''}`
-  return /connect|connection|daemon|socket|unavailable|transport|credential|UNAVAILABLE|deadline exceeded/i.test(text)
-}
-
-function buildInvokeArgs(options) {
-  const { commandId, argv = [], target, dryRun = false, storeRoot = defaultStoreRoot() } = options
-  const args = ['--credential-stdin', 'invoke', commandId]
-  if (typeof storeRoot === 'string' && storeRoot !== '') args.push('--store-root', storeRoot)
-  if (typeof target === 'string' && target !== '') args.push('--target', target)
-  if (dryRun) args.push('--dry-run')
-  args.push('--no-overlay', '--json', ...argv.map((entry) => String(entry)))
-  return args
+    return report
+  } catch (error) {
+    report.error = mapSdkError(error, 'doctor', call).message
+    report.recommendation = permissionHint(report.error) ?? PERMISSION_RECOMMENDATION
+    report.warnings.push('The permission probe failed; grant macOS permissions to DeepSeek Harness and retry.')
+    return report
+  }
 }
 
 // ---------------------------------------------------------------------------
 // Facade
 // ---------------------------------------------------------------------------
 
-function createFacade(daemon, connection, auv, runner) {
-  const context = { daemon, connection, auv, runner }
+function createFacade(shared) {
+  const context = {
+    shared,
+    mode: shared.mode,
+    connection: shared.connection,
+    auv: shared.auv,
+    runner: shared.runner,
+    endpoint: shared.endpoint,
+    daemonId: shared.daemonId,
+    pid: shared.pid,
+  }
   return {
     kind: 'sdk',
+    mode: context.mode,
     debug() {
-      return { daemonId: daemon.id, pid: daemon.pid, endpoint: daemon.connectionOptions?.endpoint ?? null }
+      return { mode: context.mode, daemonId: context.daemonId, pid: context.pid, endpoint: context.endpoint }
     },
-    screenshot: (rawArgs, exec, timeoutMs) => screenshot(context, rawArgs, exec, timeoutMs),
-    ocr: (rawArgs, exec, timeoutMs) => ocr(context, rawArgs, exec, timeoutMs),
-    click: (rawArgs, exec, timeoutMs) => click(context, rawArgs, exec, timeoutMs),
-    type: (rawArgs, exec, timeoutMs) => type(context, rawArgs, exec, timeoutMs),
-    keys: (rawArgs, exec, timeoutMs) => keys(context, rawArgs, exec, timeoutMs),
-    scroll: (rawArgs, exec, timeoutMs) => scroll(context, rawArgs, exec, timeoutMs),
-    windows: (rawArgs, exec, timeoutMs) => windows(context, rawArgs, exec, timeoutMs),
-    activate: (rawArgs, exec, timeoutMs) => activate(context, rawArgs, exec, timeoutMs),
-    runInvokeCli: async (options) =>
-      await spawnOwnedDaemonCli(context, {
-        args: buildInvokeArgs(options),
-        signal: options.signal,
-        timeoutMs: options.timeoutMs,
-      }),
-    runDoctorCli: async (options = {}) =>
-      await spawnOwnedDaemonCli(context, {
-        args: ['--credential-stdin', 'doctor', '--json'],
-        signal: options.signal,
-        timeoutMs: options.timeoutMs,
-      }),
+    screenshot: (plan, exec, timeoutMs) => screenshot(context, plan, exec, timeoutMs),
+    ocr: (plan, exec, timeoutMs) => ocr(context, plan, exec, timeoutMs),
+    click: (plan, exec, timeoutMs) => click(context, plan, exec, timeoutMs),
+    type: (plan, exec, timeoutMs) => type(context, plan, exec, timeoutMs),
+    keys: (plan, exec, timeoutMs) => keys(context, plan, exec, timeoutMs),
+    scroll: (plan, exec, timeoutMs) => scroll(context, plan, exec, timeoutMs),
+    windows: (plan, exec, timeoutMs) => windows(context, plan, exec, timeoutMs),
+    activate: (plan, exec, timeoutMs) => activate(context, plan, exec, timeoutMs),
+    doctor: (exec, timeoutMs) => doctor(context, exec, timeoutMs),
   }
-}
-
-// ---------------------------------------------------------------------------
-// CLI-tool fallbacks (auv_doctor / auv_invoke stay CLI tools)
-// ---------------------------------------------------------------------------
-
-/**
- * Run an `auv invoke` receipt, preferring the SDK-owned daemon when one is
- * active. Falls back to an independent CLI child when no daemon is running, or
- * when the routed child cannot reach the daemon (connection-level failures).
- */
-export async function runAuvWithSdkFallback(options) {
-  const started = sdkTransportIfStarted()
-  if (started !== null) {
-    try {
-      return await started.runInvokeCli(options)
-    } catch (error) {
-      if (!isCliConnectionFailure(error)) throw error
-      console.warn(`[dsh-auv] CLI could not reach the SDK daemon; retrying with an independent auv CLI: ${messageOf(error).split('\n')[0]}`)
-      return await runAuv(options)
-    }
-  }
-  if (resolveTransportConfig().mode === 'sdk') {
-    const transport = await activeSdkTransport()
-    if (transport !== null) return await transport.runInvokeCli(options)
-  }
-  return await runAuv(options)
-}
-
-/**
- * Run `auv doctor --json`. The doctor report is CLI-only; it is routed at the
- * SDK-owned daemon only when one is already running (it never forces startup,
- * so it keeps working when the daemon cannot start at all).
- */
-export async function runAuvDoctorWithSdkFallback(options = {}) {
-  const started = sdkTransportIfStarted()
-  if (started !== null) {
-    try {
-      return await started.runDoctorCli(options)
-    } catch (error) {
-      if (!isCliConnectionFailure(error)) throw error
-      console.warn(`[dsh-auv] doctor could not reach the SDK daemon; retrying with an independent auv CLI: ${messageOf(error).split('\n')[0]}`)
-      return await runAuvDoctor(options)
-    }
-  }
-  return await runAuvDoctor(options)
 }

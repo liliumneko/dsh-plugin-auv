@@ -2,22 +2,28 @@
 /**
  * Offline self-check for the @local/dsh-auv bundle.
  *
- * Imports the plugin entry, the tool definitions, and (when present) the AUV
- * catalog, then asserts that:
+ * Imports the plugin entry, the tool definitions, the transport, and (when
+ * present) the built bundle, then asserts that:
  *   - every ToolDefinition is well formed and its JSON Schemas stay inside the
  *     DSH-enforced schema subset;
- *   - the eleven auv_* tools exist with the expected parameters, description
+ *   - the nine auv_* tools exist with the expected parameters, description
  *     limits, timeouts, and `isConcurrencySafe: () => false`;
- *   - the package manifest, locales, patch, icon, and entry point are sane;
- *   - catalog.buildInvokeArgs maps representative inputs to the expected argv
- *     (catalog-dependent checks are skipped with a SKIP note when
- *     src/catalog.json / src/catalog.mjs have not been generated yet).
+ *   - the package manifest, locales, patch, icon, and entry point are sane and
+ *     the retired CLI/catalog files are gone;
+ *   - the SDK argument planners/mappers still produce the documented shapes;
+ *   - the transport decides attach-first and stops only its own daemon;
+ *   - the doctor report helpers map permission statuses to plain fields;
+ *   - runtime source contains no `auv` CLI invocation, argv builder, catalog
+ *     path, or removed transport env vars;
+ *   - `connect({ discover: true })` fails fast when nothing is discoverable;
+ *   - tool bodies validate parameters before the transport is touched;
+ *   - the bundled dist/index.mjs registers the nine tools and inlines the SDK.
  *
- * No AUV process is spawned: this script is safe to run anywhere.
+ * No AUV daemon is started by this script: safe to run anywhere.
  */
 
 import { existsSync, readFileSync, statSync } from 'node:fs'
-import { isDeepStrictEqual } from 'node:util'
+import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
@@ -37,10 +43,6 @@ function pass(label) {
 function fail(label, detail) {
   failures.push({ label, detail })
   console.log(`FAIL ${label}: ${detail}`)
-}
-
-function skip(label, detail) {
-  console.log(`SKIP ${label}: ${detail}`)
 }
 
 async function check(label, fn) {
@@ -71,6 +73,10 @@ async function assertRejects(fn, pattern, message) {
     return
   }
   throw new Error(`${message}: expected a rejection, but the call resolved`)
+}
+
+async function importSrc(relativePath) {
+  return await import(pathToFileURL(path.join(SRC, relativePath)).href)
 }
 
 // ---------------------------------------------------------------------------
@@ -209,7 +215,7 @@ function assertSupportedSchema(schema, label) {
 }
 
 // ---------------------------------------------------------------------------
-// Expected tool surface (from DESIGN.md)
+// Expected tool surface (9 SDK-only tools)
 // ---------------------------------------------------------------------------
 
 const EXPECTED = {
@@ -222,29 +228,85 @@ const EXPECTED = {
   auv_scroll: { required: ['dy'], properties: ['dy', 'dx', 'window_id', 'x', 'y'] },
   auv_windows: { required: [], properties: ['include_minimized', 'include_other_desktops'] },
   auv_activate: { required: ['application_id'], properties: ['application_id'] },
-  auv_invoke: { required: ['command_id'], properties: ['command_id', 'inputs', 'target', 'dry_run'] },
-  auv_help: { required: [], properties: ['command_id'] },
 }
 
-const DESCRIPTION_LIMITS = { auv_invoke: 1_600, default: 1_200 }
+const DESCRIPTION_LIMITS = { default: 1_200 }
 const PERMISSION_TOOLS = ['auv_doctor', 'auv_screenshot', 'auv_ocr', 'auv_click', 'auv_type', 'auv_keys', 'auv_scroll']
+
+const RETIRED_FILES = [
+  'src/catalog.json',
+  'src/catalog.mjs',
+  'src/catalog-data.mjs',
+  'src/transport/config.mjs',
+  'tools/generate-catalog.mjs',
+  'tools/sync-catalog-data.mjs',
+  'notes/catalog-selfcheck.mjs',
+]
 
 // ---------------------------------------------------------------------------
 // Checks
 // ---------------------------------------------------------------------------
 
+async function checkMissingAuvGuidance() {
+  const { AUV_INSTALL_GUIDANCE, resetAuvBinaryCache, resolveAuvBinary } = await importSrc('auv.mjs')
+
+  assert(typeof AUV_INSTALL_GUIDANCE === 'string', 'AUV_INSTALL_GUIDANCE must be exported as a string')
+  for (const needle of [
+    'brew install moeru-ai/tap/auv',
+    'https://auv.moeru.ai/install.sh',
+    'github.com/moeru-ai/auv',
+    'AUV_BIN',
+    'auv_doctor',
+    'auv serve',
+  ]) {
+    assert(AUV_INSTALL_GUIDANCE.includes(needle), `AUV_INSTALL_GUIDANCE must mention ${needle}`)
+  }
+
+  const previousBin = process.env.AUV_BIN
+  const previousPath = process.env.PATH
+  try {
+    // 1) AUV_BIN points at a non-executable path.
+    process.env.AUV_BIN = path.join(ROOT, 'missing-auv-for-test')
+    resetAuvBinaryCache()
+    let invalidError
+    try {
+      resolveAuvBinary()
+    } catch (error) {
+      invalidError = error
+    }
+    assert(invalidError !== undefined, 'resolveAuvBinary must throw when AUV_BIN is invalid')
+    assert(invalidError.code === 'AUV_BIN_INVALID', `expected AUV_BIN_INVALID, got ${invalidError.code}`)
+    assert(
+      invalidError.message.includes('brew install moeru-ai/tap/auv') && invalidError.message.includes('Install AUV'),
+      'AUV_BIN_INVALID message must include install instructions',
+    )
+
+    // 2) The guidance text is the message body used by the AUV_NOT_FOUND branch.
+    //    (A direct PATH-only simulation cannot run here because resolveAuvBinary
+    //    also probes well-known install directories, which contain auv on a dev host.)
+    assert(AUV_INSTALL_GUIDANCE.includes('Install AUV'), 'AUV_INSTALL_GUIDANCE must tell the user to install AUV')
+    assert(AUV_INSTALL_GUIDANCE.includes('verify with `auv --version`'), 'AUV_INSTALL_GUIDANCE must tell the user how to verify the install')
+    assert(invalidError.message.includes(AUV_INSTALL_GUIDANCE), 'AUV_BIN_INVALID message must embed the full install guidance')
+  } finally {
+    if (previousBin === undefined) delete process.env.AUV_BIN
+    else process.env.AUV_BIN = previousBin
+    process.env.PATH = previousPath
+    resetAuvBinaryCache()
+  }
+}
+
 async function checkToolDefinitions() {
-  const { createTools, TOOL_NAMES } = await import(pathToFileURL(path.join(SRC, 'tools.mjs')).href)
+  const { createTools, TOOL_NAMES } = await importSrc('tools.mjs')
   assert(typeof createTools === 'function', 'src/tools.mjs must export createTools()')
   assert(Array.isArray(TOOL_NAMES), 'src/tools.mjs must export the TOOL_NAMES array')
 
   const tools = createTools()
   assert(Array.isArray(tools), 'createTools() must return an array')
-  assert(tools.length === 11, `expected 11 tools, got ${tools.length}`)
+  assert(tools.length === 9, `expected 9 tools, got ${tools.length}`)
 
   const names = tools.map((tool) => tool?.name)
   assertEqual([...names].sort(), [...TOOL_NAMES].sort(), 'tool names must match TOOL_NAMES')
-  assertEqual([...names].sort(), Object.keys(EXPECTED).sort(), 'tool names must match the DESIGN.md surface')
+  assertEqual([...names].sort(), Object.keys(EXPECTED).sort(), 'tool names must match the 9-tool SDK-only surface')
   assert(new Set(names).size === names.length, 'tool names must be unique')
 
   for (const tool of tools) {
@@ -257,12 +319,10 @@ async function checkToolDefinitions() {
     assert(!/\n/.test(tool.description), `${name} description must be one paragraph without newlines`)
     assert(/^[a-z][a-z0-9_]*$/.test(name), `${name} must be a snake_case tool name`)
     assert(name.startsWith('auv_'), `${name} must start with auv_`)
+    assert(!/auv_invoke|auv_help|command catalog|AUV_DSH_TRANSPORT/i.test(tool.description), `${name} description must not mention retired CLI/catalog features`)
     if (PERMISSION_TOOLS.includes(name)) {
       assert(tool.description.includes('auv_doctor'), `${name} description must point at auv_doctor`)
       assert(/Accessibility|Screen Recording/.test(tool.description), `${name} description must name the macOS permission`)
-    }
-    if (name === 'auv_invoke') {
-      assert(tool.description.includes('auv_help'), 'auv_invoke description must point at auv_help for the id list')
     }
 
     assert(typeof tool.parameters === 'object' && tool.parameters !== null, `${name} must declare parameters`)
@@ -293,7 +353,7 @@ async function checkToolDefinitions() {
 
 async function checkEntryPoint() {
   const entry = await import(pathToFileURL(path.join(PLUGIN, 'index.js')).href)
-  assertEqual(entry.inject, ['tools'], 'index.js must export inject = [\'tools\']')
+  assertEqual(entry.inject, ['tools'], "index.js must export inject = ['tools']")
   assert(typeof entry.apply === 'function', 'index.js must export apply(ctx)')
   const registered = []
   const disposers = []
@@ -308,49 +368,70 @@ async function checkEntryPoint() {
     },
   }
   entry.apply(ctx)
-  assert(registered.length === 11, `apply() should register 11 tools, registered ${registered.length}`)
-  assert(new Set(registered.map((definition) => definition.name)).size === 11, 'apply() registered duplicate tool names')
+  assert(registered.length === 9, `apply() should register 9 tools, registered ${registered.length}`)
+  assert(new Set(registered.map((definition) => definition.name)).size === 9, 'apply() registered duplicate tool names')
   assert(disposers.length === 1, `apply() must register one dispose effect, registered ${disposers.length}`)
   assert(typeof disposers[0] === 'function', 'the dispose effect must return a disposer function')
-  // The disposer must be safe to call before any SDK daemon exists (cli/default cold state).
+  // The disposer must be safe to call before any SDK transport exists.
   await disposers[0]()
 }
 
-// ---------------------------------------------------------------------------
-// SDK transport checks (offline; no daemon is started)
-// ---------------------------------------------------------------------------
+async function checkManifestAndResources() {
+  const manifest = JSON.parse(readFileSync(path.join(PLUGIN, 'package.json'), 'utf8'))
+  assertEqual(manifest.name, '@local/dsh-auv', 'package name')
+  assertEqual(manifest.type, 'module', 'package type')
+  assertEqual(manifest.private, true, 'package private')
+  assertEqual(manifest.dsh?.bundle?.patch, './cordis.patch.yml', 'dsh.bundle.patch')
+  assertEqual(manifest.exports?.['.'], './dist/index.mjs', 'package exports "." must point at the bundled entry')
+  assert(Array.isArray(manifest.files) && manifest.files.includes('dist'), 'package.json files must ship dist/')
+  assert(typeof manifest.exports?.['./locale/*.json'] === 'string', 'package must export ./locale/*.json')
+  assert(typeof manifest.exports?.['./icon'] === 'string', 'package must export ./icon')
+  for (const dependency of ['@auv-js/sdk', 'es-toolkit', 'tsdown']) {
+    assert(typeof manifest.devDependencies?.[dependency] === 'string', `package.json devDependencies must keep ${dependency}`)
+  }
+  assertEqual(manifest.exports?.['.'], './dist/index.mjs', 'the single-file bundle is the only runtime entry')
 
-async function checkTransportConfig() {
-  const config = await import(pathToFileURL(path.join(SRC, 'transport', 'config.mjs')).href)
+  for (const file of [
+    'index.js',
+    'cordis.patch.yml',
+    'icon.svg',
+    'locale/en.json',
+    'locale/zh.json',
+    'src/auv.mjs',
+    'src/tools.mjs',
+    'src/transport/sdk-format.mjs',
+    'src/transport/sdk.mjs',
+    'dist/index.mjs',
+  ]) {
+    assert(existsSync(path.join(PLUGIN, file)), `missing required file ${file}`)
+  }
 
-  assertEqual(config.TRANSPORT_MODES, ['auto', 'sdk', 'cli'], 'TRANSPORT_MODES')
-  assertEqual(config.DEFAULT_TRANSPORT_MODE, 'auto', 'DEFAULT_TRANSPORT_MODE')
+  for (const file of RETIRED_FILES) {
+    assert(!existsSync(path.join(PLUGIN, file)), `retired CLI/catalog file must be deleted: ${file}`)
+  }
 
-  assertEqual(config.parseTransportMode(undefined).mode, 'auto', 'unset AUV_DSH_TRANSPORT defaults to auto')
-  assertEqual(config.parseTransportMode('').mode, 'auto', 'empty AUV_DSH_TRANSPORT defaults to auto')
-  assertEqual(config.parseTransportMode('auto').mode, 'auto', 'explicit auto')
-  assertEqual(config.parseTransportMode('sdk').mode, 'sdk', 'explicit sdk')
-  assertEqual(config.parseTransportMode('cli').mode, 'cli', 'explicit cli')
-  assertEqual(config.parseTransportMode('  SDK  ').mode, 'sdk', 'AUV_DSH_TRANSPORT is trimmed and case-insensitive')
+  const patch = readFileSync(path.join(PLUGIN, 'cordis.patch.yml'), 'utf8')
+  assert(/insert:/.test(patch), 'cordis.patch.yml must use an insert block')
+  assert(/id:\s*dsh-auv/.test(patch), 'cordis.patch.yml must insert the dsh-auv row id')
+  assert(/'@local\/dsh-auv'/.test(patch), 'cordis.patch.yml must name @local/dsh-auv')
 
-  const invalid = config.parseTransportMode('smtp')
-  assertEqual(invalid.mode, 'auto', 'an unknown transport falls back to auto')
-  assertEqual(invalid.invalid, 'smtp', 'the invalid value is reported')
-  assert(typeof invalid.warning === 'string' && /smtp/.test(invalid.warning), 'an unknown transport produces a warning')
+  for (const locale of ['en.json', 'zh.json']) {
+    const parsed = JSON.parse(readFileSync(path.join(PLUGIN, 'locale', locale), 'utf8'))
+    assert(typeof parsed?.meta?.title === 'string' && parsed.meta.title !== '', `locale/${locale} meta.title`)
+    assert(typeof parsed?.meta?.description === 'string' && parsed.meta.description !== '', `locale/${locale} meta.description`)
+  }
 
-  assertEqual(config.resolveTransportConfig({}).mode, 'auto', 'resolveTransportConfig() defaults to auto')
-  assertEqual(config.resolveTransportConfig({ AUV_DSH_TRANSPORT: 'cli' }).cliForced, true, 'cli forces the CLI path')
-  assertEqual(config.resolveTransportConfig({ AUV_DSH_TRANSPORT: 'cli' }).sdkPreferred, false, 'cli never prefers the SDK')
-  assertEqual(config.resolveTransportConfig({ AUV_DSH_TRANSPORT: 'sdk' }).sdkPreferred, true, 'sdk prefers the SDK')
-  assertEqual(config.resolveTransportConfig({ AUV_DSH_TRANSPORT: 'auto' }).sdkPreferred, true, 'auto prefers the SDK')
-  assertEqual(config.sdkTransportEnabled({ AUV_DSH_TRANSPORT: 'cli' }), false, 'sdkTransportEnabled(cli) is false')
-  assertEqual(config.sdkTransportEnabled({ AUV_DSH_TRANSPORT: 'sdk' }), true, 'sdkTransportEnabled(sdk) is true')
+  const iconPath = path.join(PLUGIN, 'icon.svg')
+  assert(statSync(iconPath).size < 256 * 1024, 'icon.svg must stay under 256 KiB')
+  const icon = readFileSync(iconPath, 'utf8')
+  assert(/<svg[\s>]/.test(icon), 'icon.svg must contain an svg root element')
+  assert(/viewBox=/.test(icon), 'icon.svg should declare a viewBox')
 }
 
 async function checkSdkArgumentMapping() {
-  const format = await import(pathToFileURL(path.join(SRC, 'transport', 'sdk-format.mjs')).href)
+  const format = await importSrc('transport/sdk-format.mjs')
 
-  // Windows options invert the CLI's exclude flags.
+  // Windows options invert the list flags.
   assertEqual(format.parseWindowsArgs({}), { includeMinimized: false, includeOtherDesktops: false }, 'auv_windows defaults')
   assertEqual(
     format.parseWindowsArgs({ include_minimized: true, include_other_desktops: true }),
@@ -414,7 +495,7 @@ async function checkSdkArgumentMapping() {
   assertEqual(format.formatTargetString({ windowId: '9' }), 'window:9', 'target string window')
   assertEqual(format.formatTargetString({ applicationId: 'com.x' }), 'app:com.x', 'target string application')
 
-  // Value mappers produce the CLI receipt shapes.
+  // Value mappers produce plain snake_case tool values.
   const row = format.mapWindowRow(
     {
       applicationName: 'App',
@@ -456,254 +537,238 @@ async function checkSdkArgumentMapping() {
   assertEqual(nullRow.application_id, null, 'mapWindowRow maps a missing application id to null')
 }
 
-async function checkSdkCliDefault() {
-  const previous = process.env.AUV_DSH_TRANSPORT
-  process.env.AUV_DSH_TRANSPORT = 'cli'
-  try {
-    const sdk = await import(pathToFileURL(path.join(SRC, 'transport', 'sdk.mjs')).href)
-    sdk.resetSdkTransportState()
-    assert(!sdk.sdkTransportIfStarted(), 'sdkTransportIfStarted() must be null before any call')
-    assertEqual(await sdk.activeSdkTransport(), null, 'cli mode must not start the SDK transport')
-    const status = sdk.sdkTransportStatus()
-    assertEqual(status.mode, 'cli', 'cli-mode status')
-    assertEqual(status.started, false, 'cli mode must not start a daemon')
-    assertEqual(status.pid, null, 'cli mode must not spawn a daemon process')
-    sdk.resetSdkTransportState()
-  } finally {
-    if (previous === undefined) delete process.env.AUV_DSH_TRANSPORT
-    else process.env.AUV_DSH_TRANSPORT = previous
+async function checkAttachFirstDecision() {
+  const sdk = await importSrc('transport/sdk.mjs')
+
+  const makeRunner = () => ({ windows: {}, macos: {} })
+  const makeConnection = (calls) => ({ close: async () => { calls.closed += 1 } })
+
+  // 1) Nothing discoverable -> attach fails -> plugin starts (and owns) a daemon.
+  {
+    const calls = { connect: [], started: 0, closed: 0, stopped: 0 }
+    const connection = makeConnection(calls)
+    const runner = makeRunner()
+    const daemon = {
+      id: 'owned-daemon',
+      pid: 4242,
+      connectionOptions: { endpoint: 'unix:///tmp/owned.sock' },
+      connect: async () => connection,
+      stop: async () => {
+        calls.stopped += 1
+        return { code: 0, signal: null }
+      },
+      exited: new Promise(() => {}),
+    }
+    const deps = {
+      connect: async (options) => {
+        calls.connect.push(options)
+        throw new Error('no AUV daemon discovered; run `auv serve`, set AUV_ENDPOINT, or pass endpoint')
+      },
+      createAuv: () => ({ health: { check: async () => ({ id: 'owned-daemon', status: 'serving' }) }, runner: () => runner }),
+      startAuv: async () => {
+        calls.started += 1
+        return daemon
+      },
+      discoverEndpoint: async () => undefined,
+      resolveBinary: () => '/fake/auv',
+    }
+    const state = sdk.createSdkTransportState()
+    const facade = await sdk.initializeSdkTransport(state, deps)
+    assertEqual(facade.mode, 'owned', 'attach failure must fall back to an owned daemon')
+    assertEqual(calls.connect.length, 1, 'attach must be attempted exactly once')
+    assertEqual(calls.connect[0].discover, true, "attach must use connect({ discover: true })")
+    assertEqual(calls.started, 1, 'a daemon must be started only after attach fails')
+    assertEqual(state.mode, 'owned', 'owned transport mode')
+    assertEqual(state.pid, 4242, 'owned daemon pid')
+    assertEqual(state.endpoint, 'unix:///tmp/owned.sock', 'owned daemon endpoint')
+    assertEqual(state.attachError !== null, true, 'the failed attach reason is recorded for diagnostics')
+    await sdk.disposeTransportState(state)
+    assertEqual(calls.closed, 1, 'dispose of an owned transport closes the connection')
+    assertEqual(calls.stopped, 1, 'dispose of an owned transport stops the daemon')
   }
+
+  // 2) A discoverable daemon -> attach, never start; dispose leaves it running.
+  {
+    const calls = { started: 0, closed: 0, stopped: 0 }
+    const connection = makeConnection(calls)
+    const runner = makeRunner()
+    const deps = {
+      connect: async () => connection,
+      createAuv: () => ({ health: { check: async () => ({ id: 'user-daemon', status: 'serving' }) }, runner: () => runner }),
+      startAuv: async () => {
+        calls.started += 1
+        throw new Error('startAuv must not be called when a daemon is discoverable')
+      },
+      discoverEndpoint: async () => ({ endpoint: 'unix:///tmp/user.sock', local: false, transport: 'unix' }),
+      resolveBinary: () => {
+        throw new Error('the binary must not be resolved when attaching succeeds')
+      },
+    }
+    const state = sdk.createSdkTransportState()
+    const facade = await sdk.initializeSdkTransport(state, deps)
+    assertEqual(facade.mode, 'attached', 'a discoverable daemon must be attached, not re-owned')
+    assertEqual(calls.started, 0, 'attach-first must not start a daemon when one is discoverable')
+    assertEqual(state.mode, 'attached', 'attached transport mode')
+    assertEqual(state.endpoint, 'unix:///tmp/user.sock', 'attached endpoint')
+    assertEqual(state.pid, null, 'attached daemons have no pid (not our process)')
+    await sdk.disposeTransportState(state)
+    assertEqual(calls.closed, 1, 'dispose of an attached transport closes its connection')
+    assertEqual(calls.stopped, 0, 'dispose of an attached transport must not stop the user daemon')
+  }
+
+  // 3) A discovered daemon that fails its health check -> closed, then owned.
+  {
+    const calls = { started: 0, closed: 0, stopped: 0 }
+    const connection = makeConnection(calls)
+    const runner = makeRunner()
+    const daemon = {
+      id: 'owned-daemon-2',
+      pid: 5252,
+      connectionOptions: { endpoint: 'unix:///tmp/owned2.sock' },
+      connect: async () => ({ close: async () => { calls.closed += 1 } }),
+      stop: async () => {
+        calls.stopped += 1
+        return { code: 0, signal: null }
+      },
+      exited: new Promise(() => {}),
+    }
+    let healthCalls = 0
+    const deps = {
+      connect: async () => connection,
+      createAuv: () => ({
+        health: {
+          check: async () => {
+            healthCalls += 1
+            if (healthCalls === 1) throw new Error('attached daemon health check failed')
+            return { id: 'owned-daemon-2', status: 'serving' }
+          },
+        },
+        runner: () => runner,
+      }),
+      startAuv: async () => {
+        calls.started += 1
+        return daemon
+      },
+      discoverEndpoint: async () => ({ endpoint: 'unix:///tmp/stale.sock' }),
+      resolveBinary: () => '/fake/auv',
+    }
+    const state = sdk.createSdkTransportState()
+    const facade = await sdk.initializeSdkTransport(state, deps)
+    assertEqual(facade.mode, 'owned', 'a failed attach health check must fall back to an owned daemon')
+    assertEqual(calls.closed, 1, 'the failed attach connection must be closed before starting')
+    await sdk.disposeTransportState(state)
+    assertEqual(calls.closed, 2, 'both the failed attach connection and the owned connection are closed')
+    assertEqual(calls.stopped, 1, 'the owned daemon is stopped on dispose')
+  }
+
+  // 4) Singleton helpers start cold and stay safe to reset.
+  sdk.resetSdkTransportState()
+  const status = sdk.sdkTransportStatus()
+  assertEqual(status.started, false, 'sdkTransportStatus().started must be false before any call')
+  assertEqual(status.mode, null, 'sdkTransportStatus().mode must be null before any call')
+  assertEqual(status.attachAttempted, false, 'sdkTransportStatus().attachAttempted must be false before any call')
+  assertEqual(await sdk.disposeSdkTransport(), undefined, 'disposeSdkTransport must be a safe no-op when cold')
+  sdk.resetSdkTransportState()
 }
 
-async function checkSdkAutoFallback() {
-  const previousTransport = process.env.AUV_DSH_TRANSPORT
-  const previousBin = process.env.AUV_BIN
-  const previousWarn = console.warn
-  const warnings = []
-  process.env.AUV_DSH_TRANSPORT = 'auto'
-  process.env.AUV_BIN = path.join(ROOT, 'missing-auv-for-sdk-test')
-  console.warn = (...args) => {
-    warnings.push(args.map((entry) => String(entry)).join(' '))
-  }
-  try {
-    const sdk = await import(pathToFileURL(path.join(SRC, 'transport', 'sdk.mjs')).href)
-    sdk.resetSdkTransportState()
-    assertEqual(await sdk.activeSdkTransport(), null, 'auto mode must fall back to the CLI when the SDK cannot start')
-    assertEqual(warnings.length, 1, `auto fallback must warn exactly once, warned ${warnings.length} time(s)`)
-    assert(/Falling back to the auv CLI/.test(warnings[0]), `auto fallback warning text: ${warnings[0]}`)
-    const status = sdk.sdkTransportStatus()
-    assertEqual(status.fallback, true, 'auto fallback status')
-    assertEqual(status.started, false, 'auto fallback must not leave a daemon running')
-    assertEqual(status.pid, null, 'auto fallback must not leave a daemon process')
-    assertEqual(await sdk.activeSdkTransport(), null, 'auto fallback is permanent for the process')
-    assertEqual(warnings.length, 1, 'auto fallback warns once, not on every call')
-    sdk.resetSdkTransportState()
-  } finally {
-    console.warn = previousWarn
-    if (previousTransport === undefined) delete process.env.AUV_DSH_TRANSPORT
-    else process.env.AUV_DSH_TRANSPORT = previousTransport
-    if (previousBin === undefined) delete process.env.AUV_BIN
-    else process.env.AUV_BIN = previousBin
-  }
-}
+async function checkDoctorHelpers() {
+  const format = await importSrc('transport/sdk-format.mjs')
 
-async function checkManifestAndResources() {
-  const manifest = JSON.parse(readFileSync(path.join(PLUGIN, 'package.json'), 'utf8'))
-  assertEqual(manifest.name, '@local/dsh-auv', 'package name')
-  assertEqual(manifest.type, 'module', 'package type')
-  assertEqual(manifest.private, true, 'package private')
-  assertEqual(manifest.dsh?.bundle?.patch, './cordis.patch.yml', 'dsh.bundle.patch')
-  assertEqual(manifest.exports?.['.'], './dist/index.mjs', 'package exports "." must point at the bundled entry')
-  assert(Array.isArray(manifest.files) && manifest.files.includes('dist'), 'package.json files must ship dist/')
-  assert(typeof manifest.exports?.['./locale/*.json'] === 'string', 'package must export ./locale/*.json')
-  assert(typeof manifest.exports?.['./icon'] === 'string', 'package must export ./icon')
+  assertEqual(format.permissionStatusName(0), 'unknown', 'permission status 0')
+  assertEqual(format.permissionStatusName(1), 'granted', 'permission status 1')
+  assertEqual(format.permissionStatusName(2), 'missing', 'permission status 2')
+  assertEqual(format.permissionStatusName(3), 'unknown', 'permission status 3')
+  assertEqual(format.permissionStatusName(undefined), 'unknown', 'permission status missing value')
 
-  for (const file of ['index.js', 'cordis.patch.yml', 'icon.svg', 'locale/en.json', 'locale/zh.json', 'src/auv.mjs', 'src/tools.mjs', 'src/catalog-data.mjs', 'src/transport/config.mjs', 'src/transport/sdk-format.mjs', 'src/transport/sdk.mjs', 'dist/index.mjs']) {
-    assert(existsSync(path.join(PLUGIN, file)), `missing required file ${file}`)
-  }
+  const granted = format.summarizePermissions({ screenRecording: 1, screenCaptureKit: 1, accessibility: 1, automationToSystemEvents: 2 })
+  assertEqual(granted, { accessibility: 'granted', screen_recording: 'granted', screen_capture_kit: 'granted', automation: 'missing' }, 'summarizePermissions')
+  assertEqual(format.permissionsAllOk(granted), true, 'granted permissions are all_ok')
+  assertEqual(format.summarizePermissions(null), null, 'summarizePermissions tolerates a missing probe')
 
-  const patch = readFileSync(path.join(PLUGIN, 'cordis.patch.yml'), 'utf8')
-  assert(/insert:/.test(patch), 'cordis.patch.yml must use an insert block')
-  assert(/id:\s*dsh-auv/.test(patch), 'cordis.patch.yml must insert the dsh-auv row id')
-  assert(/'@local\/dsh-auv'/.test(patch), 'cordis.patch.yml must name @local/dsh-auv')
-
-  for (const locale of ['en.json', 'zh.json']) {
-    const parsed = JSON.parse(readFileSync(path.join(PLUGIN, 'locale', locale), 'utf8'))
-    assert(typeof parsed?.meta?.title === 'string' && parsed.meta.title !== '', `locale/${locale} meta.title`)
-    assert(typeof parsed?.meta?.description === 'string' && parsed.meta.description !== '', `locale/${locale} meta.description`)
-  }
-
-  const iconPath = path.join(PLUGIN, 'icon.svg')
-  assert(statSync(iconPath).size < 256 * 1024, 'icon.svg must stay under 256 KiB')
-  const icon = readFileSync(iconPath, 'utf8')
-  assert(/<svg[\s>]/.test(icon), 'icon.svg must contain an svg root element')
-  assert(/viewBox=/.test(icon), 'icon.svg should declare a viewBox')
-}
-
-async function checkCatalog() {
-  const catalogJson = path.join(SRC, 'catalog.json')
-  const catalogModule = path.join(SRC, 'catalog.mjs')
-  if (!existsSync(catalogJson) || !existsSync(catalogModule)) {
-    skip('catalog checks', 'src/catalog.json / src/catalog.mjs not generated yet (run tools/generate-catalog.mjs)')
-    return
-  }
-  assert(existsSync(catalogJson) && existsSync(catalogModule), 'catalog.json and catalog.mjs must ship together')
-
-  const catalog = await import(pathToFileURL(catalogModule).href)
-  for (const name of ['loadCatalog', 'getCommand', 'buildInvokeArgs', 'formatTarget', 'summaryText', 'commandHelpText']) {
-    assert(typeof catalog[name] === 'function', `catalog.mjs must export ${name}()`)
-  }
-  const data = await catalog.loadCatalog()
-  assert(Array.isArray(data?.commands), 'catalog.json must contain a commands array')
-  assert(data.commands.length === 43, `catalog should contain 43 commands, found ${data.commands.length}`)
-  const ids = data.commands.map((command) => command.id)
-  assert(new Set(ids).size === ids.length, 'catalog command ids must be unique')
-  assert(typeof catalog.CATALOG === 'object' && catalog.CATALOG !== null, 'catalog.mjs must export CATALOG')
-
-  const get = (id) => {
-    const command = catalog.getCommand(id)
-    assert(command !== undefined && command !== null, `catalog.getCommand("${id}") returned nothing`)
-    return command
-  }
-  const argsOf = (command) => (Array.isArray(command.arguments) ? command.arguments : [])
-  const positional = (command, index = 0) => {
-    const found = argsOf(command).filter((argument) => argument.kind === 'positional')[index]
-    assert(found !== undefined, `${command.id} has no positional argument ${index}`)
-    assert(typeof found.input_key === 'string', `${command.id} positional argument ${index} has no input_key`)
-    return found
-  }
-  const flagged = (command, flag) => {
-    const found = argsOf(command).find((argument) => argument.flag === flag)
-    assert(found !== undefined, `${command.id} has no ${flag} argument`)
-    assert(typeof found.input_key === 'string', `${command.id} ${flag} argument has no input_key`)
-    return found
-  }
-  const build = async (id, inputs) => {
-    const built = await catalog.buildInvokeArgs(get(id), inputs)
-    assert(Array.isArray(built?.args), `buildInvokeArgs(${id}) must return { args: string[] }`)
-    return built.args.map((argument) => String(argument))
-  }
-  const hasPair = (args, flag, value) => args.some((argument, index) => argument === flag && args[index + 1] === String(value))
-
-  // Input-key names the tools resolve dynamically at runtime (must match CLI truth).
-  assertEqual(positional(get('display.findText'), 0).input_key, 'query', 'display.findText positional input key')
-  assertEqual(positional(get('window.findText'), 0).input_key, 'query', 'window.findText positional input key')
-  assertEqual(positional(get('window.waitForText'), 0).input_key, 'query', 'window.waitForText positional input key')
-  assertEqual(positional(get('display.clickText'), 0).input_key, 'query', 'display.clickText positional input key')
-  assertEqual(positional(get('input.typeText'), 0).input_key, 'text', 'input.typeText positional input key')
-  assertEqual(positional(get('input.pressKeys'), 0).input_key, 'keys', 'input.pressKeys positional input key')
-  assertEqual(positional(get('input.pressKeys'), 0).repeated, true, 'input.pressKeys keys must be repeated')
-  const scrollPoint = get('input.scrollPoint')
+  const missing = format.summarizePermissions({ screenRecording: 2, screenCaptureKit: 2, accessibility: 2, automationToSystemEvents: 2 })
+  assertEqual(format.permissionsAllOk(missing), false, 'missing permissions are not all_ok')
   assertEqual(
-    [0, 1, 2, 3].map((index) => positional(scrollPoint, index).input_key),
-    ['x', 'y', 'delta_x', 'delta_y'],
-    'input.scrollPoint positional input keys',
+    format.permissionsAllOk({ accessibility: 'granted', screen_recording: 'granted', screen_capture_kit: 'missing', automation: 'unknown' }),
+    false,
+    'a missing ScreenCaptureKit is not all_ok',
   )
-  assertEqual(flagged(get('display.clickText'), '--within').input_key, 'within', 'display.clickText --within input key')
-  assertEqual(flagged(get('window.clickText'), '--title').input_key, 'title', 'window.clickText --title input key')
-  assertEqual(flagged(get('window.capture'), '--title').input_key, 'title', 'window.capture --title input key')
-  assertEqual(flagged(get('input.pressKeys'), '--count').input_key, 'count', 'input.pressKeys --count input key')
-  assertEqual(flagged(get('input.pressKeys'), '--interval-ms').input_key, 'interval-ms', 'input.pressKeys --interval-ms input key')
-  assertEqual(flagged(get('window.scroll'), '--dx').input_key, 'dx', 'window.scroll --dx input key')
-  assertEqual(flagged(get('window.scroll'), '--dy').input_key, 'dy', 'window.scroll --dy input key')
-  assertEqual(flagged(get('input.typeText'), '--input-policy').input_key, 'input-policy', 'input.typeText --input-policy input key')
+  assert(typeof format.PERMISSION_RECOMMENDATION === 'string' && /System Settings/.test(format.PERMISSION_RECOMMENDATION), 'permission recommendation text')
+}
 
-  // Positional mapping: display.findText TEXT.
-  const findText = get('display.findText')
-  const findTextKey = positional(findText, 0).input_key
-  assertEqual(await build('display.findText', { [findTextKey]: 'Settings' }), ['Settings'], 'display.findText positional argv')
-
-  // Required value flags: display.captureRegion --x --y --width --height.
-  const region = get('display.captureRegion')
-  const regionInputs = {
-    [flagged(region, '--x').input_key]: 10,
-    [flagged(region, '--y').input_key]: 20,
-    [flagged(region, '--width').input_key]: 300,
-    [flagged(region, '--height').input_key]: 200,
+async function checkNoCliRuntime() {
+  const files = ['index.js', 'src/auv.mjs', 'src/tools.mjs', 'src/transport/sdk-format.mjs', 'src/transport/sdk.mjs']
+  const forbidden = [
+    { pattern: /node:child_process/, label: 'child_process import' },
+    { pattern: /\bspawn\s*\(/, label: 'spawn()' },
+    { pattern: /\bexecFile\b|\bexecSync\b/, label: 'exec helper' },
+    { pattern: /--no-daemon|--credential-stdin|--no-overlay|--dry-run|--json\b/, label: 'CLI argv flags' },
+    { pattern: /AUV_DSH_TRANSPORT|AUV_DSH_NO_DAEMON|AUV_DSH_OVERLAY|AUV_DSH_STORE_ROOT/, label: 'removed transport env var' },
+    { pattern: /catalog\.(json|mjs|data)|generate-catalog|sync-catalog|buildInvokeArgs|summaryText|commandHelpText/, label: 'catalog path' },
+    { pattern: /\brunAuv\b|\brunAuvDoctor\b|\breceiptFailure\b/, label: 'CLI runner helper' },
+    { pattern: /'invoke'|"invoke"|`invoke`/, label: 'CLI invoke command' },
+  ]
+  for (const file of files) {
+    const source = readFileSync(path.join(PLUGIN, file), 'utf8')
+    for (const { pattern, label } of forbidden) {
+      assert(!pattern.test(source), `${file} must not contain ${label} (${pattern})`)
+    }
   }
-  const regionArgs = await build('display.captureRegion', regionInputs)
-  assert(hasPair(regionArgs, '--x', 10), `display.captureRegion args missing --x 10: ${JSON.stringify(regionArgs)}`)
-  assert(hasPair(regionArgs, '--y', 20), `display.captureRegion args missing --y 20: ${JSON.stringify(regionArgs)}`)
-  assert(hasPair(regionArgs, '--width', 300), `display.captureRegion args missing --width 300: ${JSON.stringify(regionArgs)}`)
-  assert(hasPair(regionArgs, '--height', 200), `display.captureRegion args missing --height 200: ${JSON.stringify(regionArgs)}`)
 
-  // Presence flags: window.list --exclude-minimized / --exclude-other-desktops.
-  const list = get('window.list')
-  const excludeMinimizedKey = flagged(list, '--exclude-minimized').input_key
-  const excludeOtherKey = flagged(list, '--exclude-other-desktops').input_key
-  const listArgs = await build('window.list', { [excludeMinimizedKey]: true, [excludeOtherKey]: true })
-  assert(listArgs.includes('--exclude-minimized'), 'window.list true flag should add --exclude-minimized')
-  assert(listArgs.includes('--exclude-other-desktops'), 'window.list true flag should add --exclude-other-desktops')
-  const listArgsOff = await build('window.list', { [excludeMinimizedKey]: false, [excludeOtherKey]: false })
-  assert(!listArgsOff.includes('--exclude-minimized'), 'window.list false flag must not add --exclude-minimized')
-  assert(!listArgsOff.includes('--exclude-other-desktops'), 'window.list false flag must not add --exclude-other-desktops')
-
-  // Positional numbers: input.clickPoint X Y.
-  const clickPoint = get('input.clickPoint')
-  assertEqual(
-    await build('input.clickPoint', { [positional(clickPoint, 0).input_key]: 10, [positional(clickPoint, 1).input_key]: 20 }),
-    ['10', '20'],
-    'input.clickPoint positional argv',
-  )
-
-  // Repeated arguments: input.pressKeys KEY...
-  const pressKeys = get('input.pressKeys')
-  const keyArg = positional(pressKeys, 0)
-  const keyInputs = keyArg.repeated === true ? { [keyArg.input_key]: ['ctrl', 'l'] } : { [keyArg.input_key]: 'ctrl' }
-  const keyArgs = await build('input.pressKeys', keyInputs)
-  if (keyArg.repeated === true) assertEqual(keyArgs.slice(0, 2), ['ctrl', 'l'], 'input.pressKeys repeated positional argv')
-  else assert(keyArgs.length > 0, 'input.pressKeys positional argv must not be empty')
-
-  // Unknown keys and missing required arguments reject.
-  await assertRejects(() => build('display.findText', { [findTextKey]: 'Settings', not_a_real_key: 1 }), /unknown|not.*recogniz|not_a_real_key/i, 'buildInvokeArgs must reject unknown inputs')
-  await assertRejects(() => build('display.findText', {}), /missing|required/i, 'buildInvokeArgs must reject missing required inputs')
-  await assertRejects(
-    () => build('display.captureRegion', { [flagged(region, '--x').input_key]: 10, [flagged(region, '--y').input_key]: 20, [flagged(region, '--width').input_key]: 300 }),
-    /missing|required/i,
-    'buildInvokeArgs must reject missing required --height',
-  )
-
-  // Target formatting.
-  assertEqual(await catalog.formatTarget({ application_id: 'com.apple.TextEdit' }), 'app:com.apple.TextEdit', 'formatTarget application')
-  assertEqual(await catalog.formatTarget({ window_id: '1234' }), 'window:1234', 'formatTarget window')
-  assertEqual(await catalog.formatTarget({ display_id: '1' }), 'display:1', 'formatTarget display')
-
-  // app:<id> must map onto the catalog's "application" accepted type (the plugin's
-  // auv_invoke comparison uses targetTypeName for exactly this mapping).
-  const fakeAppCommand = { id: 'fake.command', arguments: [], target: { policy: 'optional', accepted_types: ['application'] } }
-  const fakeAppBuilt = await catalog.buildInvokeArgs(fakeAppCommand, {}, { target: 'app:com.apple.TextEdit' })
-  assertEqual(fakeAppBuilt.target, 'app:com.apple.TextEdit', 'app: target must be returned for an application target')
+  // Positive markers: the transport attaches before starting, and index.js
+  // disposes the transport on unload.
+  const transport = readFileSync(path.join(SRC, 'transport', 'sdk.mjs'), 'utf8')
+  assert(/connect\(\s*\{\s*discover:\s*true/.test(transport), 'sdk.mjs must call connect({ discover: true })')
+  assert(transport.indexOf('await tryAttach(') !== -1, 'sdk.mjs must attempt attach')
   assert(
-    !fakeAppBuilt.warnings.some((warning) => /accepts|not .*target/i.test(warning)),
-    `app: target must be accepted as an application target; warnings: ${JSON.stringify(fakeAppBuilt.warnings)}`,
+    transport.indexOf('await tryAttach(') < transport.indexOf('await startOwnedDaemon('),
+    'sdk.mjs must attempt attach before starting an owned daemon',
   )
-  const fakeWindowCommand = { id: 'fake.window', arguments: [], target: { policy: 'required', accepted_types: ['application', 'window'] } }
-  const fakeWindowBuilt = await catalog.buildInvokeArgs(fakeWindowCommand, {}, { target: 'window:42' })
-  assertEqual(fakeWindowBuilt.target, 'window:42', 'window: target must be returned for a window target')
+  assert(/disposeTransportState/.test(transport), 'sdk.mjs must expose ownership-aware dispose')
+  assert(/mode === 'owned' \? shared\.daemon : null/.test(transport), 'dispose must stop only an owned daemon')
+  const index = readFileSync(path.join(PLUGIN, 'index.js'), 'utf8')
+  assert(/disposeSdkTransport/.test(index), 'index.js must dispose the SDK transport on unload')
+}
 
-  // Help text.
-  const summary = await catalog.summaryText()
-  assert(typeof summary === 'string' && summary.length > 100, 'summaryText() must return a non-empty string')
-  assert(summary.includes('display.findText'), 'summaryText() must mention display.findText')
-  const detail = await catalog.commandHelpText('display.findText')
-  assert(typeof detail === 'string' && detail.includes('display.findText'), 'commandHelpText("display.findText") must return its details')
+async function checkDiscoveryFallback() {
+  const previousDescriptor = process.env.AUV_DISCOVERY_FILE
+  const previousEndpoint = process.env.AUV_ENDPOINT
+  process.env.AUV_DISCOVERY_FILE = path.join(os.tmpdir(), `dsh-auv-missing-descriptor-${process.pid}.json`)
+  delete process.env.AUV_ENDPOINT
+  try {
+    const { connect } = await import('@auv-js/sdk/node')
+    const started = Date.now()
+    await assertRejects(
+      () => connect({ discover: true, signal: AbortSignal.timeout(2_000) }),
+      /no AUV daemon discovered/,
+      'connect({ discover: true }) must report when nothing is discoverable',
+    )
+    const elapsed = Date.now() - started
+    assert(elapsed < 2_000, `a missing descriptor must fail fast, took ${elapsed} ms`)
+  } finally {
+    if (previousDescriptor === undefined) delete process.env.AUV_DISCOVERY_FILE
+    else process.env.AUV_DISCOVERY_FILE = previousDescriptor
+    if (previousEndpoint === undefined) delete process.env.AUV_ENDPOINT
+    else process.env.AUV_ENDPOINT = previousEndpoint
+  }
 }
 
 async function checkOfflineExecuteGuards() {
-  const previousTransport = process.env.AUV_DSH_TRANSPORT
-  process.env.AUV_DSH_TRANSPORT = 'cli'
+  const previousBin = process.env.AUV_BIN
+  const previousDescriptor = process.env.AUV_DISCOVERY_FILE
+  const previousEndpoint = process.env.AUV_ENDPOINT
+  process.env.AUV_BIN = path.join(ROOT, 'missing-auv-for-test')
+  process.env.AUV_DISCOVERY_FILE = path.join(os.tmpdir(), `dsh-auv-missing-descriptor-guards-${process.pid}.json`)
+  delete process.env.AUV_ENDPOINT
   try {
-    const { createTools, targetTypeName } = await import(pathToFileURL(path.join(SRC, 'tools.mjs')).href)
-    const sdk = await import(pathToFileURL(path.join(SRC, 'transport', 'sdk.mjs')).href)
+    const { createTools } = await importSrc('tools.mjs')
+    const sdk = await importSrc('transport/sdk.mjs')
+    const auv = await importSrc('auv.mjs')
+    auv.resetAuvBinaryCache()
     sdk.resetSdkTransportState()
     const byName = new Map(createTools().map((tool) => [tool.name, tool]))
     const exec = { signal: new AbortController().signal }
 
-    assertEqual(targetTypeName('app:com.apple.TextEdit'), 'application', 'target type name for app: targets')
-    assertEqual(targetTypeName('window:1234'), 'window', 'target type name for window: targets')
-    assertEqual(targetTypeName('display:1'), 'display', 'target type name for display: targets')
-
-    // Validation happens before any AUV call; in cli mode nothing may spawn.
+    // Validation happens before any transport work; no daemon may be started.
     await assertRejects(() => byName.get('auv_click').execute({}, exec), /requires either "text"/, 'auv_click must reject an empty click')
     await assertRejects(() => byName.get('auv_click').execute({ text: 'OK', x: 1, y: 2 }, exec), /not both forms/, 'auv_click must reject text plus coordinates')
     await assertRejects(() => byName.get('auv_type').execute({}, exec), /Missing required parameter "text"/, 'auv_type must require text')
@@ -713,7 +778,6 @@ async function checkOfflineExecuteGuards() {
     await assertRejects(() => byName.get('auv_scroll').execute({}, exec), /requires "dy"/, 'auv_scroll must require dy')
     await assertRejects(() => byName.get('auv_ocr').execute({ text: 'Hello', timeout_ms: 5000 }, exec), /only valid with wait/, 'auv_ocr must reject timeout_ms without wait')
     await assertRejects(() => byName.get('auv_screenshot').execute({ window_id: '1', display_id: '1' }, exec), /only one of/, 'auv_screenshot must reject competing targets')
-    await assertRejects(() => byName.get('auv_invoke').execute({}, exec), /Missing required parameter "command_id"/, 'auv_invoke must require command_id')
     if (process.platform === 'darwin') {
       await assertRejects(
         () => byName.get('auv_scroll').execute({ dy: 10, x: 1, y: 2 }, exec),
@@ -721,78 +785,32 @@ async function checkOfflineExecuteGuards() {
         'auv_scroll must fail fast for screen-point scrolling on macOS',
       )
     }
-    assertEqual(sdk.sdkTransportStatus().started, false, 'cli-mode execute guards must not start a daemon')
+    const status = sdk.sdkTransportStatus()
+    assertEqual(status.started, false, 'validation failures must not start the transport')
+    assertEqual(status.attachAttempted, false, 'validation failures must not even attempt to attach')
+
+    // auv_doctor never throws: with no discoverable daemon and a broken AUV_BIN
+    // it returns a diagnostic report carrying the install guidance.
+    const doctor = byName.get('auv_doctor')
+    const report = await doctor.execute({}, exec)
+    assertEqual(report.all_ok, false, 'doctor must report all_ok:false when the transport cannot start')
+    assertEqual(report.permissions_checked, false, 'doctor must not claim permissions were checked')
+    assert(typeof report.error === 'string' && report.error.includes('brew install moeru-ai/tap/auv'), 'doctor error must include the AUV install commands')
+    assert(typeof report.recommendation === 'string' && report.recommendation !== '', 'doctor must include a recommendation')
+    const rendered = doctor.output.render({}, report)
+    assert(Array.isArray(rendered) && /not fully ready/.test(rendered[0].text), 'doctor render must explain the failure')
+    assertEqual(sdk.sdkTransportStatus().started, false, 'the failed doctor call must not leave a daemon running')
     sdk.resetSdkTransportState()
-  } finally {
-    if (previousTransport === undefined) delete process.env.AUV_DSH_TRANSPORT
-    else process.env.AUV_DSH_TRANSPORT = previousTransport
-  }
-}
-
-async function checkMissingAuvGuidance() {
-  const {
-    AUV_INSTALL_GUIDANCE,
-    resetAuvBinaryCache,
-    resolveAuvBinary,
-  } = await import(pathToFileURL(path.join(SRC, 'auv.mjs')).href)
-
-  assert(typeof AUV_INSTALL_GUIDANCE === 'string', 'AUV_INSTALL_GUIDANCE must be exported as a string')
-  for (const needle of [
-    'brew install moeru-ai/tap/auv',
-    'https://auv.moeru.ai/install.sh',
-    'github.com/moeru-ai/auv',
-    'AUV_BIN',
-    'auv_doctor',
-  ]) {
-    assert(AUV_INSTALL_GUIDANCE.includes(needle), `AUV_INSTALL_GUIDANCE must mention ${needle}`)
-  }
-
-  const previousBin = process.env.AUV_BIN
-  const previousPath = process.env.PATH
-  try {
-    // 1) AUV_BIN points at a non-executable path.
-    process.env.AUV_BIN = path.join(ROOT, 'missing-auv-for-test')
-    resetAuvBinaryCache()
-    let invalidError
-    try {
-      resolveAuvBinary()
-    } catch (error) {
-      invalidError = error
-    }
-    assert(invalidError !== undefined, 'resolveAuvBinary must throw when AUV_BIN is invalid')
-    assert(invalidError.code === 'AUV_BIN_INVALID', `expected AUV_BIN_INVALID, got ${invalidError.code}`)
-    assert(
-      invalidError.message.includes('brew install moeru-ai/tap/auv') && invalidError.message.includes('Install AUV'),
-      'AUV_BIN_INVALID message must include install instructions',
-    )
-
-    // 2) The guidance text is the message body used by the AUV_NOT_FOUND branch.
-    //    (A direct PATH-only simulation cannot run here because resolveAuvBinary
-    //    also probes well-known install directories, which contain auv on a dev host.)
-    assert(AUV_INSTALL_GUIDANCE.includes('Install AUV'), 'AUV_INSTALL_GUIDANCE must tell the user to install AUV')
-    assert(AUV_INSTALL_GUIDANCE.includes('verify with `auv --version`'), 'AUV_INSTALL_GUIDANCE must tell the user how to verify the install')
-    assert(invalidError.message.includes(AUV_INSTALL_GUIDANCE), 'AUV_BIN_INVALID message must embed the full install guidance')
   } finally {
     if (previousBin === undefined) delete process.env.AUV_BIN
     else process.env.AUV_BIN = previousBin
-    process.env.PATH = previousPath
-    resetAuvBinaryCache()
+    if (previousDescriptor === undefined) delete process.env.AUV_DISCOVERY_FILE
+    else process.env.AUV_DISCOVERY_FILE = previousDescriptor
+    if (previousEndpoint === undefined) delete process.env.AUV_ENDPOINT
+    else process.env.AUV_ENDPOINT = previousEndpoint
+    const auv = await importSrc('auv.mjs')
+    auv.resetAuvBinaryCache()
   }
-}
-
-async function checkCatalogData() {
-  const jsonPath = path.join(SRC, 'catalog.json')
-  const dataPath = path.join(SRC, 'catalog-data.mjs')
-  assert(existsSync(jsonPath), 'src/catalog.json must exist (run node tools/catalog.mjs)')
-  assert(existsSync(dataPath), 'src/catalog-data.mjs must exist (run node tools/sync-catalog-data.mjs)')
-
-  const json = JSON.parse(readFileSync(jsonPath, 'utf8'))
-  const data = (await import(pathToFileURL(dataPath).href)).default
-  assert(isDeepStrictEqual(json, data), 'src/catalog-data.mjs must mirror src/catalog.json exactly; run node tools/sync-catalog-data.mjs')
-
-  const catalogSource = readFileSync(path.join(SRC, 'catalog.mjs'), 'utf8')
-  assert(catalogSource.includes("from './catalog-data.mjs'"), 'catalog.mjs must import the generated data module')
-  assert(!/readFileSync\(/.test(catalogSource), 'catalog.mjs must not read catalog.json at runtime (the bundle has no side files)')
 }
 
 async function checkBundle() {
@@ -812,6 +830,10 @@ async function checkBundle() {
     source.includes('AUV daemon exited before becoming healthy') || source.includes('@grpc/grpc-js'),
     'dist/index.mjs must inline the @auv-js/sdk daemon/gRPC client (marker strings missing; run pnpm build)',
   )
+  assert(source.includes('no AUV daemon discovered'), 'dist/index.mjs must inline the SDK discovery client')
+  for (const marker of ['auv_help', 'auv_invoke', 'AUV_DSH_TRANSPORT', 'AUV_DSH_NO_DAEMON', 'generate-catalog']) {
+    assert(!source.includes(marker), `dist/index.mjs must not contain retired CLI/catalog marker ${marker}`)
+  }
 
   const bundle = await import(`${pathToFileURL(distPath).href}?check=${Date.now()}`)
   assertEqual(bundle.inject, ['tools'], "bundle must export inject = ['tools']")
@@ -828,15 +850,16 @@ async function checkBundle() {
       disposers.push(callback())
     },
   })
-  assertEqual(registered.length, 11, 'bundled apply() should register 11 tools')
-  assert(new Set(registered.map((definition) => definition.name)).size === 11, 'bundled apply() registered duplicate tool names')
+  assertEqual(registered.length, 9, 'bundled apply() should register 9 tools')
+  assert(new Set(registered.map((definition) => definition.name)).size === 9, 'bundled apply() registered duplicate tool names')
+  assertEqual(
+    registered.map((definition) => definition.name).sort(),
+    Object.keys(EXPECTED).sort(),
+    'bundled tool names must match the 9-tool surface',
+  )
   assertEqual(disposers.length, 1, 'bundled apply() must register the SDK transport dispose effect')
   assert(typeof disposers[0] === 'function', 'bundled dispose effect must return a disposer')
   await disposers[0]()
-
-  const help = registered.find((definition) => definition.name === 'auv_help')
-  const value = await help.execute({}, { signal: new AbortController().signal })
-  assert(value?.mode === 'summary' && value?.count === 43, 'bundled auv_help must read the inlined catalog (43 commands)')
 }
 
 async function main() {
@@ -844,16 +867,15 @@ async function main() {
   console.log(`plugin: ${PLUGIN}`)
 
   await check('missing AUV guidance', checkMissingAuvGuidance)
-  await check('tool definitions', checkToolDefinitions)
+  await check('tool definitions (9, SDK-only)', checkToolDefinitions)
   await check('plugin entry point', checkEntryPoint)
-  await check('manifest, patch, locales, icon', checkManifestAndResources)
-  await check('transport config (AUV_DSH_TRANSPORT)', checkTransportConfig)
+  await check('manifest, resources, retired files', checkManifestAndResources)
   await check('SDK argument mapping', checkSdkArgumentMapping)
-  await check('SDK transport disabled in cli mode', checkSdkCliDefault)
-  await check('SDK auto-mode CLI fallback', checkSdkAutoFallback)
-  await check('catalog data mirror', checkCatalogData)
+  await check('attach-first decision and ownership', checkAttachFirstDecision)
+  await check('SDK doctor report helpers', checkDoctorHelpers)
+  await check('no CLI or catalog in runtime source', checkNoCliRuntime)
+  await check('discovery falls back quickly when no daemon exists', checkDiscoveryFallback)
   await check('offline execute guards', checkOfflineExecuteGuards)
-  await check('catalog contract', checkCatalog)
   await check('bundled dist/index.mjs', checkBundle)
 
   console.log('')

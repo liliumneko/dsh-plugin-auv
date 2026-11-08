@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "AUV 桌面自动化",
-    "description": "通过 AUV 控制 macOS 应用：截图、OCR 文字识别、点击、输入、按键、滚动、窗口管理以及直接调用 AUV 命令。"
+    "description": "通过 AUV 控制 macOS 应用：截图、OCR 文字识别、点击、输入、按键、滚动和窗口管理。"
   }
 }

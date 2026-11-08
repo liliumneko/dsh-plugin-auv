@@ -6,11 +6,10 @@
  * without starting a daemon. `src/transport/sdk.mjs` imports it and performs
  * the actual RPCs.
  *
- * The input planners mirror the validation the CLI tool bodies already do, so
- * the two transports reject bad input with the same messages. The mappers
- * convert protobuf-style shapes (`MessageShape`, camelCase, `$typeName`) into
- * the snake_case JSON shapes the CLI receipts return and the tool renderers
- * already understand.
+ * The input planners run in the tool bodies *before* the transport is started,
+ * so malformed requests never attach to or spawn a daemon. The mappers convert
+ * protobuf-style shapes (`MessageShape`, camelCase, `$typeName`) into the plain
+ * snake_case JSON shapes the tool renderers understand.
  */
 
 import { isPlainObject } from 'es-toolkit'
@@ -437,3 +436,56 @@ export const INPUT_POLICY_VALUES = {
   'background-preferred': 2,
   'foreground-preferred': 3,
 }
+
+// ---------------------------------------------------------------------------
+// Diagnostics helpers (permission probe -> plain doctor fields)
+// ---------------------------------------------------------------------------
+
+/**
+ * AUV `PermissionStatus` enum values
+ * (`PERMISSION_STATUS_UNSPECIFIED/GRANTED/MISSING/UNKNOWN` = 0/1/2/3).
+ */
+export const PERMISSION_STATUS_NAMES = ['unknown', 'granted', 'missing', 'unknown']
+
+/** AUV `PermissionStatus` numeric value -> plain name. */
+export function permissionStatusName(value) {
+  const index = Number(value)
+  if (!Number.isInteger(index) || index < 0 || index >= PERMISSION_STATUS_NAMES.length) return 'unknown'
+  return PERMISSION_STATUS_NAMES[index]
+}
+
+/**
+ * `runner.macos.permissions.probe()` response -> plain doctor permission fields.
+ *
+ * @param {object|null|undefined} probe
+ * @returns {{accessibility: string, screen_recording: string, screen_capture_kit: string, automation: string}|null}
+ */
+export function summarizePermissions(probe) {
+  if (probe === null || probe === undefined || typeof probe !== 'object') return null
+  return {
+    accessibility: permissionStatusName(probe.accessibility),
+    screen_recording: permissionStatusName(probe.screenRecording),
+    screen_capture_kit: permissionStatusName(probe.screenCaptureKit),
+    automation: permissionStatusName(probe.automationToSystemEvents),
+  }
+}
+
+/**
+ * Whether the probed permissions are enough for the typed tools.
+ *
+ * Screen text/capture needs Screen Recording (and ScreenCaptureKit when the
+ * backend reports it); clicks/typing/keys need Accessibility. Automation to
+ * System Events is optional (some activation paths fall back without it).
+ */
+export function permissionsAllOk(permissions) {
+  if (permissions === null || permissions === undefined) return false
+  return (
+    permissions.accessibility === 'granted' &&
+    permissions.screen_recording === 'granted' &&
+    permissions.screen_capture_kit !== 'missing'
+  )
+}
+
+/** Plain recommendation shown when a macOS permission is missing. */
+export const PERMISSION_RECOMMENDATION =
+  'Open System Settings → Privacy & Security, enable DeepSeek Harness (macOS 27+ merges the permission list into "Device Control and Data Access"; older macOS shows Accessibility and Screen Recording as separate items), restart DeepSeek Harness, then run auv_doctor again.'

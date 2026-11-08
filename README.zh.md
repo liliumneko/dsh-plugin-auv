@@ -1,17 +1,17 @@
-<p align="right"><img src="icon.svg" width="72" alt="AUV 桌面自动化"></p>
+<img src="icon.svg" width="72" alt="AUV 桌面自动化"/>
 
 # dsh-auv — DeepSeek Harness 的 AUV 桌面自动化插件
 
 [English](./README.md) | **简体中文**
 
-把 [AUV](https://github.com/moeru-ai/auv) 的操作系统自动化能力接成 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）的 11 个原生模型工具：截图、Vision OCR、点击、输入、按键、滚动、窗口列表、应用激活、通用命令入口、就绪检查与命令帮助。8 个 typed 工具有两条传输通道：默认走 AUV 官方 [`@auv-js/sdk`](https://www.npmjs.com/package/@auv-js/sdk)（插件自己启动一个 AUV daemon），并保留 `auv invoke` CLI 作为 fallback。
+将 [AUV](https://github.com/moeru-ai/auv) 的操作系统自动化能力集成到 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）的原生模型工具。
+
+插件使用 AUV 官方 [`@auv-js/sdk`](https://www.npmjs.com/package/@auv-js/sdk)：优先连接你已经在运行的 AUV daemon；没有可连接的就自己启动一个私有 daemon。插件不调用 `auv` 命令行。
 
 > [!WARNING]
-> **只安装这个插件是没用的。** 它只是 DSH ↔ AUV 的桥；真正干活的是外部的 **AUV CLI**，而且必须把 macOS 权限授予 **DeepSeek Harness**。请先完成[前置工作](#前置工作)，否则工具虽然会出现，但每次调用只会返回安装/授权指引（`auv_doctor` 会告诉你缺什么）。
+> **务必在此之前安装AUV** 系统若为 macOS 则须授予 **DeepSeek Harness** 权限 。安装与配置参考[前置工作](#前置工作)。
 
 ## 前置工作
-
-三件事缺一不可，这也是“插件装了但没反应”的最常见原因：
 
 1. **安装 AUV CLI 并确保在 `PATH` 里**，用 `auv --version` 确认。
 
@@ -22,15 +22,9 @@
    | Windows | `scoop bucket add auv https://github.com/moeru-ai/auv` 然后 `scoop install auv/auv` |
    | proto | `proto plugin add auv "https://raw.githubusercontent.com/moeru-ai/auv/main/toolchain/proto/auv.toml" --to global` 然后 `proto install auv latest --config-mode global --pin global` |
 
-   如果 AUV 不在 `PATH`，启动 Harness 前把 `AUV_BIN` 设为 auv 可执行文件的绝对路径。
+   若 AUV 不在 `PATH`，则启动 Harness 前需将 `AUV_BIN` 设为 auv 可执行文件的绝对路径。
 
-2. **把 macOS 权限授予 DeepSeek Harness**（不是授予 `auv`，也不是授予终端）：
-   - **辅助功能（Accessibility）**：点击、输入、按键、滚动、激活应用。
-   - **屏幕录制（Screen Recording）**：截图与 OCR。
-   - macOS 27+ 已把这些权限合并到 **系统设置 → 隐私与安全性 → 设备控制与数据访问**；旧版 macOS 是分开的「辅助功能」「屏幕录制」两行。在其中启用 `DeepSeek Harness.app`（没有就用 `+` 添加）。
-   - **完全退出并重新打开 DeepSeek Harness**：权限只在进程启动时读取。
-
-3. **安装并启用本插件**（见[安装](#安装)），然后运行 `auv_doctor`；就绪时应为 `all_ok: true`。
+2. **安装并启用本插件**（见[安装](#安装)），然后运行 `auv_doctor`；就绪时应为 `all_ok: true`。
 
 ## AUV 是什么
 
@@ -51,44 +45,54 @@ AUV 相关链接：
 
 ## 安装
 
-本仓库本身就是插件包目录。运行时产物是已构建好的单文件 `dist/index.mjs`（用 [tsdown](https://tsdown.dev) 打包，无运行时 npm 依赖），已提交到仓库，clone 后安装无需构建。
+插件已经构建好，运行时产物就是仓库里的单文件 `dist/index.mjs`，没有运行时 npm 依赖，不需要 clone 或 build。
+
+在 **设置 → 插件 → 添加插件** 的输入框里填这个仓库地址：
+
+```
+https://github.com/liliumneko/dsh-plugin-auv
+```
+
+点安装，然后启用「AUV 桌面自动化」。安装后 9 个 `auv_*` 工具会在下一步模型调用时出现；建议先跑 `auv_doctor`。
+
+这个对话框也接受 npm 包名和本地目录，这里填 GitHub 仓库地址即可。从 GitHub 拉取慢的话，可以在对话框里换安装源。
+
+在会话里也可以用命令，`target` 填同一个地址：
+
+```
+plugin_manager action=install_bundle target=https://github.com/liliumneko/dsh-plugin-auv
+```
+
+要改代码时才需要 clone：
 
 ```sh
 git clone https://github.com/liliumneko/dsh-plugin-auv.git
+plugin_manager action=install_bundle target=/absolute/path/to/dsh-plugin-auv
 ```
 
-然后在 DSH 会话中安装到当前 profile（把路径换成你的 clone 路径）：
-
-```
-plugin_manager action=install_bundle target=/absolute/path/to/dsh-auv
-```
-
-或在 **设置 → 插件 → 添加插件 → 从目录安装**，然后启用「AUV 桌面自动化」这一项。安装后 11 个 `auv_*` 工具在下一步模型调用时出现；建议先跑 `auv_doctor`。
-
-插件以本地链接目录方式安装：`git pull` 后重启 Harness 即生效。禁用：`plugin_manager action=set_plugin target=dsh-auv enabled=false`。
+本地目录是链接安装，改完源码执行 `pnpm build`、重启 Harness 后生效。禁用：
+`plugin_manager action=set_plugin target=dsh-auv enabled=false`。
 
 ## macOS 权限
 
 1. 打开 **系统设置 → 隐私与安全性**；macOS 27+ 进入 **设备控制与数据访问**，旧版 macOS 分别进入**辅助功能**与**屏幕录制**。
-2. 启用 **DeepSeek Harness**（macOS 27+ 列表里每个 App 一个开关；找不到就点 `+` 选 `/Applications/DeepSeek Harness.app`，或先触发一次输入命令并在弹窗中允许）。
+2. 启用 **DeepSeek Harness**（列表若无则按 `+` 添加 `/Applications/DeepSeek Harness.app`，或先触发一次输入命令并在弹窗中允许）。
 3. **退出并重新启动 DeepSeek Harness**。
-4. 运行 `auv_doctor` 确认 `all_ok: true`，或运行 `auv_invoke permission.probe` 确认 `accessibility` / `screen_recording` 均为 `granted`。
+4. 运行 `auv_doctor` 确认 `all_ok: true`；报告会列出缺失的权限。
 
 ## 工具
 
-| 工具 | 作用 | 对应 AUV 命令 |
+| 工具 | 作用 |
 | --- | --- | --- |
-| `auv_doctor` | 权限/就绪诊断；AUV 未安装时返回安装命令 | `auv doctor --json` |
-| `auv_screenshot` | 截全屏/窗口/应用/显示器/区域，返回 `artifact_path` 供 `read_image` 查看 | `display.capture` 等 |
-| `auv_ocr` | OCR 找文字；`wait: true` 可轮询等待 | `display.findText` 等 |
-| `auv_click` | 点击 OCR 文字或坐标（可带按钮/围栏/目标） | `display.clickText` / `input.clickPoint` |
-| `auv_type` | 输入或粘贴文本 | `input.typeText` / `input.pasteText` |
-| `auv_keys` | 按一个组合键（可重复） | `input.pressKeys` |
-| `auv_scroll` | 在窗口内滚动（Linux/Windows 才支持屏幕点滚动） | `window.scroll` / `input.scrollPoint` |
-| `auv_windows` | 列出窗口 id、应用 id、标题、位置、状态 | `window.list` |
-| `auv_activate` | 把应用带到前台 | `application.activate` |
-| `auv_invoke` | 任意 AUV 命令的通用入口 | 任意 |
-| `auv_help` | 列出全部命令或某命令的参数/示例 | 无（仅本地目录） |
+| `auv_doctor` | 权限、daemon 状态与整体就绪情况的诊断；缺东西时给出安装/授权提示，不抛错 |
+| `auv_screenshot` | 截全屏、窗口、应用、显示器或屏幕区域，返回 `.webp` 路径供 `read_image` 查看 |
+| `auv_ocr` | 在屏幕或窗口里找文字；`wait: true` 会轮询等待 |
+| `auv_click` | 点击 OCR 找到的文字，或点击指定坐标；可指定鼠标键、目标和点击区域 |
+| `auv_type` | 向当前焦点控件输入或粘贴文字 |
+| `auv_keys` | 按一个组合键，可重复 |
+| `auv_scroll` | 在窗口内滚动，按窗口内坐标 |
+| `auv_windows` | 列出窗口的 id、应用 id、标题、位置和状态 |
+| `auv_activate` | 把应用带到前台 |
 
 `auv_screenshot` 的 `.webp` 结果需要再调用 DSH 的 `read_image` 查看图像；工具本身不返回图片字节。
 
@@ -96,39 +100,22 @@ plugin_manager action=install_bundle target=/absolute/path/to/dsh-auv
 
 | 环境变量 | 默认 | 作用 |
 | --- | --- | --- |
-| `AUV_DSH_TRANSPORT` | `auto` | 传输选择：`auto`（优先 SDK，daemon 启动失败则永久回退 CLI）、`sdk`（强制 SDK，失败即报错）、`cli`（完全不启动 SDK daemon） |
-| `AUV_DSH_SDK_STORE_ROOT` | `$DSH_HOME/auv/sdk`（通常 `~/.dsh/auv/sdk`） | 插件自有 SDK daemon 的 store 根与 socket 状态 |
-| `AUV_DSH_CAPTURE_DIR` | `$DSH_HOME/auv/sdk-captures`（通常 `~/.dsh/auv/sdk-captures`） | SDK 模式截图 `.webp` 的落盘目录，供 `read_image` 使用 |
-| `AUV_BIN` | 依次从 `PATH`、`/opt/homebrew/bin`、`/usr/local/bin`、`~/.local/bin`、`~/.cargo/bin` 查找 | `auv` 可执行文件绝对路径；无效时会直接报错并附安装指引 |
-| `AUV_DSH_STORE_ROOT` | `$DSH_HOME/auv/runs`（通常 `~/.dsh/auv/runs`） | CLI 路径的 `--store-root`，保证 run 收据与 artifact 路径稳定 |
-| `AUV_DSH_NO_DAEMON` | 未设置（使用本地 daemon） | CLI 路径每次调用加 `--no-daemon`（SDK 传输忽略此项） |
-| `AUV_DSH_OVERLAY` | 未设置（默认关闭 overlay） | 设为 `1` 保留 AUV 可视化 overlay |
+| `AUV_BIN` | 依次从 `PATH`、`/opt/homebrew/bin`、`/usr/local/bin`、`~/.local/bin`、`~/.cargo/bin` 查找 | `auv` 可执行文件绝对路径；只有插件需要自己启动 daemon 时用得到。无效时会报错并附安装指引 |
+| `AUV_DSH_SDK_STORE_ROOT` | `$DSH_HOME/auv/sdk`（通常 `~/.dsh/auv/sdk`） | 插件自己启动的 daemon 的 store 目录 |
+| `AUV_DSH_CAPTURE_DIR` | `$DSH_HOME/auv/sdk-captures`（通常 `~/.dsh/auv/sdk-captures`） | 截图 `.webp` 的保存目录，供 `read_image` 使用 |
 
-## 传输与 daemon 生命周期
+查找可连接的 daemon 时会遵循 AUV 自己的 `AUV_ENDPOINT` / `AUV_DISCOVERY_FILE`；`DSH_HOME` 可以改上面的默认数据目录。
 
-插件有两条可互换的传输通道：
+## daemon 连接方式
 
-- **SDK（默认 `AUV_DSH_TRANSPORT=auto`）**：第一次 typed 工具调用时通过 `@auv-js/sdk` 懒启动一个
-  **插件自有的 `auv serve` daemon**，然后用 typed gRPC 客户端调用。daemon 使用 `TMPDIR` 下的私有 unix
-  socket、launcher-token 鉴权、`--no-register`（不会占用/替换用户自己的 `auv serve`），并带
-  `--exit-on-stdin-close`（Harness 退出即退出）。插件卸载/重载时通过 `ctx.effect` 停止它，
-  `globalThis` 单例避免重载泄漏。首次调用含 daemon 启动与 Runner 懒创建（约 1–5 秒），之后很快。
-- **CLI（`AUV_DSH_TRANSPORT=cli` 或自动回退）**：历史上每次调用一个 `auv invoke` 子进程，行为、
-  artifact 与 Run 记录语义保持不变。
+插件不会主动替换你已经启动的 daemon。
 
-`auto`（默认）在 SDK daemon 启动失败时打印**一次**警告，然后在当前进程内永久回退 CLI；`sdk` 模式则
-直接暴露启动错误，便于排查。
+- **第一次调用**：先找正在运行的 AUV daemon 并连上去（最多约 2 秒）。找不到时，才自己启动一个私有 `auv serve`：使用自己的 socket 和 launcher token，不写 AUV 的发现文件，Harness 退出时它也跟着退出。只有这种情况才需要 `auv` 可执行文件。
+- **后续调用**：复用同一个连接。daemon 不在了，下次调用会重新连接或重新启动。
+- **卸载或重载插件**：关闭连接。插件自己启动的 daemon 会被停止；你自己启动的 daemon 不受影响。
+- **`auv_doctor`**：会说明当前是连接了已有 daemon，还是用插件自己启动的 daemon，以及它监听的地址。
 
-`auv_doctor`、`auv_invoke`、`auv_help` 仍走 CLI/catalog（SDK 没有 doctor 报告，也不接受 CLI argv）。
-SDK 模式下 `auv_doctor`/`auv_invoke` 会通过 `AUV_ENDPOINT` + `--credential-stdin` 复用已运行的 owned
-daemon；`auv_doctor` 不会主动拉起 daemon。
-
-| 方面 | SDK 传输 | CLI 传输 |
-| --- | --- | --- |
-| 截图 | `CaptureResolution.LOGICAL`（1 px/point），限制 2048²，插件写 `.webp` 到 `AUV_DSH_CAPTURE_DIR` | AUV 原生截图（Retina 上 2×），由 AUV 持久化到 `AUV_DSH_STORE_ROOT` |
-| 工具结果里的 `run_id` | `null`（v1 不为每次调用创建 Run/trace） | AUV Run id + run/artifact 记录 |
-| `window_id` 定位 | 精确 `WindowClient` 绑定（capture/findText/click/type/keys/scroll） | CLI 的 `window.capture`/`findText`/`clickText` 需要 `app:` + `--title`，插件先解析窗口 |
-| `auv_ocr wait: true` | 客户端轮询 `findText`（每次新截图） | `display.waitForText`/`window.waitForText` |
+截图使用逻辑分辨率（1 像素/屏幕点），最大 2048×2048。SDK 不会为每次调用创建 AUV run，所以工具结果里的 `run_id` 是 `null`，这一点和旧版命令行实现不同。
 
 ## 示例
 
@@ -141,54 +128,44 @@ auv_click { "text": "保存", "application_id": "com.apple.TextEdit" }
 auv_type { "text": "hello", "mode": "paste" }
 auv_keys { "keys": ["cmd", "t"], "repeat": 3, "interval_ms": 120 }
 auv_scroll { "window_id": "<id>", "dy": 600 }
-auv_invoke { "command_id": "display.list" }
-auv_help { "command_id": "display.findText" }
 ```
 
 ## 为什么不用 MCP 桥
 
-AUV 自带 `auv mcp serve`，用 `@deepseek-ai/dsh-mcp-client` 零代码就能接。但该路线会把 AUV 完整 MCP schema 每轮都塞进上下文：实测 AUV 0.0.43 为 181,539 B（compact 117,422 B，约 29k tokens），其中 74 KB 是单个 `invoke` 工具里内嵌的命令目录。
+AUV 自带 `auv mcp serve`，用 `@deepseek-ai/dsh-mcp-client` 零代码就能接。但这条路线每轮都会把 AUV 完整的 MCP schema 放进上下文：实测 AUV 0.0.43 是 181,539 B（compact 117,422 B，约 29k tokens），其中大部分是单个 `invoke` 工具里内嵌的命令列表。
 
-本插件 11 个工具的 schema 合计 **13,392 B（约 3.3k tokens）**，比 MCP 桥 compact 约小 **8.8 倍**，且无额外进程/握手。命令目录放在本地（43 条，由 AUV MCP 生成并与 `auv invoke <id> --help` 交叉校验），由 `auv_help` 按需展示；截图 artifact 交给 DSH 原生 `read_image`。
+本插件 9 个工具的 schema 合计 **10,645 B（约 2.7k tokens）**，比 MCP 桥的 compact 版本小约 **11 倍**，而且没有额外的 MCP 进程和握手。完整 bundle 在磁盘上是 1.45 MB（315 kB gzip），因为带上了 SDK 和 gRPC 客户端；它只加载一次，不占模型上下文。
 
 ## 排障
 
-- **SDK daemon 启动失败**：`auto` 模式会打印一次警告并永久回退 CLI，工具仍可用；可设
-  `AUV_DSH_TRANSPORT=cli` 完全跳过 SDK 启动，或设 `sdk` 暴露启动错误。确认
-  `AUV_DSH_SDK_STORE_ROOT` 可写。owned daemon 使用 `--no-register`，不会和用户自己的 AUV daemon 冲突。
-
-- **`AUV was not found`**：AUV 没装或不在 `PATH`。错误信息里有完整安装命令和仓库链接；装好后重启 Harness，再跑 `auv_doctor`。
-- **插件装了但没反应**：按顺序检查三项前置（AUV 已装、DeepSeek Harness 已获辅助功能与屏幕录制、授权后已重启），`auv_doctor` 会指出缺失项。
-- **daemon / socket 错误**：默认使用本地 daemon；如果 Host 连不上，设置 `AUV_DSH_NO_DAEMON=1` 后重启 Harness。
-- **OCR 报 `vision OCR failed …`**：缺屏幕录制；授权并重启后重试。若权限显示已给仍报错，通常是进程还是旧权限状态，重启即可。
-- **`wait: true` 超时**：AUV 0.0.43 的 `display.waitForText` / `window.waitForText` 有已知上游问题（CLI 同样复现），建议先用不带 `wait` 的 `auv_ocr` 重试。
-- **截图路径读不到**：把返回的绝对路径原样传给 `read_image`。
+- **`AUV was not found`**：AUV 没装或不在 `PATH`。错误信息里有安装命令和仓库链接；装好后重启 Harness，再跑 `auv_doctor`。已有 daemon 在跑时，插件不装 AUV 也能连上。
+- **插件装了但没反应**：先跑 `auv_doctor`。它会说明 AUV 是否找到、能不能连上 daemon、缺哪个 macOS 权限。
+- **连不上 daemon**：看 `auv_doctor` 里的 endpoint 和错误。插件需要在没有可连接 daemon 时自己启动一个的话，确认 `AUV_DSH_SDK_STORE_ROOT` 可写。插件不会替换或停止你自己启动的 daemon。
+- **权限错误**：按 [macOS 权限](#macos-权限) 授权，重启 Harness 后再跑 `auv_doctor`。
+- **OCR 报 `vision OCR failed …`**：缺屏幕录制，或授权还没生效；授权并重启后重试。这期间可以先用 `auv_screenshot` + `read_image`。
+- **`wait: true` 超时**：SDK 版本是在客户端反复调用 `findText`。文字还在加载时，用更短的 `timeout_ms` 重试比长时间等待更有效。
+- **截图路径读不到**：把返回的绝对路径原样传给 `read_image`。超过 7 天的截图会被清理。
 
 ## 开发
 
-源码是 `index.js` + `src/` 的纯 ESM；运行时产物是**单个自包含文件 `dist/index.mjs`**，由
-[tsdown](https://tsdown.dev)（Rolldown）打包：11 个工具定义、AUV 命令目录和 es-toolkit 辅助函数全部内联，
-Node 内建模块保持 external；SDK 及其 gRPC/protobuf 客户端也内联。无运行时 npm 依赖，bundle 约
-1.58 MB raw / 338 KB gzip，`dist/` 已提交，目录安装无需构建。
+源码是 `index.js` + `src/` 的纯 ESM。运行时产物是单个文件 `dist/index.mjs`，用
+[tsdown](https://tsdown.dev) 打包：9 个工具、SDK 连接和 es-toolkit 辅助函数都在里面，Node 内建模块保持
+external。没有运行时 npm 依赖，`dist/` 已提交，目录安装不用构建。
 
 ```sh
-pnpm install                        # 仅维护者：安装 tsdown / es-toolkit
-pnpm build                          # tsdown -> dist/index.mjs（记得提交产物）
-pnpm check                          # 离线自检：源码、manifest、目录镜像、bundle
-node notes/catalog-selfcheck.mjs    # 命令目录 argv 自检（43 条）
+pnpm install
+pnpm build     # 生成 dist/index.mjs
+pnpm check     # 离线自检：工具、manifest、SDK 参数映射、daemon 连接逻辑、bundle
 ```
 
-AUV 升级后刷新目录：
-
-```sh
-node tools/generate-catalog.mjs     # 重新生成 src/catalog.json（MCP + CLI 交叉校验）
-node tools/sync-catalog-data.mjs    # 镜像为 src/catalog-data.mjs（运行时内联的数据模块）
-pnpm build                          # 重新打包单文件
-```
+当前 bundle 是 1,445,677 字节（315,032 字节 gzip）。daemon 的连接与归属逻辑由离线自检覆盖，用的是假的
+transport 依赖，不需要真的起 daemon。
 
 ## 状态
 
-已在 macOS 27.2 + AUV 0.0.43 + DeepSeek Harness 上完成端到端验证：11 个工具、真实输入投递（`auv_click → auv_type → auv_keys` 在 Harness 输入框里打字并发送消息）、截图→`read_image`、OCR、窗口/显示器定位与负向用例。SDK 传输也在真实 DSH Host 内验证：插件自有 daemon 以 `--no-register` 启动，typed `window.list`/`capture`/`recognizeText` 正常，截图写入 `~/.dsh/auv/sdk-captures` 并可被 `read_image` 显示，`auv_invoke` 能复用 owned daemon，进程列表中可见 `auv serve … --local-socket … --no-register`。证据见 [`notes/verification-report.md`](notes/verification-report.md)、[`notes/sdk-transport.md`](notes/sdk-transport.md)、[`notes/sdk-api-map.md`](notes/sdk-api-map.md)。
+已在 macOS 27.2 + AUV 0.0.43 + DeepSeek Harness 上验证。9 个工具用只读调用测过（doctor、windows、截图 → `read_image`、OCR），两种模式都跑过：连接已有 daemon，以及插件自己启动 daemon。插件自己启动的 daemon 在卸载时会停止；不是自己启动的保持运行。点击、输入、按键、滚动、激活这几个工具验证过参数检查，旧版命令行实现下做过真实输入测试；这一版没有再用真实输入重跑。
+
+历史记录（旧的命令行实现、SDK API 调研）在 [`notes/`](notes/)。
 
 ## 版权与许可
 

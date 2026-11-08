@@ -228,3 +228,185 @@ app-owned daemon; `node:*` builtins stay external and the bundle imports only
    `AUV_DSH_NO_DAEMON=1` inside the DSH bash sandbox (AUV's detached
    autostart cannot run there). Unchanged from before; the real Host uses the
    normal CLI daemon path.
+
+---
+
+# Simplification: attach-first, SDK-only, 9 tools (task-8)
+
+Implemented by `transport-simplifier`. This section supersedes the transport matrix
+and CLI notes above; the earlier sections stay as historical evidence for the
+CLI/SDK-fallback era.
+
+## What changed
+
+| File | Change |
+| --- | --- |
+| `src/transport/sdk.mjs` | Rewritten. **Attach-first, SDK-only** transport: `connect({ discover: true })` (bounded to 2 s) → if nothing is reachable, `startAuv()` owns a private daemon. No CLI child process, no argv builder, no receipt parsing. Tracks `attached` vs `owned`; dispose closes the connection always and stops the daemon **only when owned**. Transport-level failures (`UNAVAILABLE`, transport/protocol/remote errors) forget the client so the next tool call re-attaches or starts again. `auv_doctor` implemented on the SDK (`health.check` + `macos.permissions.probe()`), never throws. Exports `createSdkTransportState()` / `initializeSdkTransport(shared, deps)` / `disposeTransportState(shared)` / `SDK_DEPENDENCIES` for offline unit tests. |
+| `src/transport/sdk-format.mjs` | Pure planners/mappers kept; header no longer says "CLI receipts". Added `permissionStatusName`, `summarizePermissions`, `permissionsAllOk`, `PERMISSION_RECOMMENDATION` for the doctor report. |
+| `src/tools.mjs` | **9 tools**: `auv_doctor`, `auv_screenshot`, `auv_ocr`, `auv_click`, `auv_type`, `auv_keys`, `auv_scroll`, `auv_windows`, `auv_activate`. Removed `auv_invoke` and `auv_help`, every CLI fallback body, the catalog access layer, window→app resolution workarounds, and receipt helpers. Tool bodies run the pure planner *before* `activeSdkTransport()`, so invalid input never attaches/starts a daemon. `auv_doctor` catches transport-init failure and returns a plain diagnostic report containing install/permission guidance. Tool values gain `daemon_mode` (`attached`/`owned`) and `daemon_endpoint`. |
+| `src/auv.mjs` | Trimmed to binary discovery (`resolveAuvBinary`, `AUV_BIN`/PATH handling), `AUV_INSTALL_GUIDANCE`, `AuvError`, `clampTimeout`, `permissionHint`. Removed `runAuv`/`runAuvDoctor`/`spawn`/receipt parsing/`childEnvironment`/`defaultStoreRoot`/`artifactPathOf`. |
+| `src/transport/config.mjs` | **Deleted.** No `AUV_DSH_TRANSPORT` / `auto`/`sdk`/`cli` modes any more. |
+| `src/catalog.json`, `src/catalog.mjs`, `src/catalog-data.mjs` | **Deleted** (no generic invoke/help tool). |
+| `tools/generate-catalog.mjs`, `tools/sync-catalog-data.mjs`, `notes/catalog-selfcheck.mjs` | **Deleted** (dead tooling). `notes/*.md` evidence docs kept. |
+| `index.js` | Same effect-scoped dispose, but it now closes the connection and stops only an owned daemon. Preflight wording: a missing CLI does not prevent attaching to a running daemon, only owning one. |
+| `tools/check-tools.mjs` | Rewritten for 9 tools: no catalog checks; added attach-first/ownership unit checks (injected fake SDK deps), doctor helper checks, a runtime-source grep proving no CLI/catalog/removed-env code, a fast-fail `connect({discover:true})` check, validation-before-transport execute guards, and bundle checks for 9 tools + no retired markers. **11 checks, all pass.** |
+| `dist/index.mjs` | Rebuilt with `pnpm build`: **1,445,677 bytes raw / 315,032 bytes gzip** (was 1,577,618 / 338,083 — the catalog data is gone). |
+
+## Transport behaviour
+
+1. First tool call → `ensureSdkTransport()` (module singleton on `globalThis`,
+   symbol `@local/dsh-auv/sdk-transport.v2`, so a reload reuses it).
+2. **Attach**: `discoverEndpoint()` for diagnostics (optional) then
+   `connect({ discover: true, signal: AbortSignal.timeout(2000) })`, then
+   `createAuv(connection)`, `health.check` (5 s), `runner({runnerClass:'auv.core.local'})`.
+   Discovery honours `AUV_ENDPOINT` first and the OS-user discovery descriptor
+   second (macOS: `~/Library/Application Support/ai.moeru.auv/api-server.json`;
+   `AUV_DISCOVERY_FILE` overrides the path). A CLI-started/registered daemon uses
+   `os-user` local auth, so no credential is needed.
+3. **Owned fallback**: `resolveAuvBinary()` → `startAuv({ binaryPath, storeRoot,
+   workingDirectory, environment, startupTimeoutMs: 15000 })`. This keeps the
+   private socket, launcher-token auth, `noRegister` (no discovery descriptor) and
+   `exit-on-stdin-close`. `AUV_BIN`/PATH handling is unchanged.
+4. **Dispose**: awaits any in-flight init, closes the connection, and calls
+   `daemon.stop()` only when `mode === 'owned'`. Idempotent; concurrent calls
+   share one teardown promise. An attached user daemon is never stopped.
+5. **Recovery**: if the attached daemon exits (idle-exit after 5 min, user
+   quits it), the failing call maps to `AUV_UNAVAILABLE`, the state is forgotten,
+   and the next call attaches again or starts an owned daemon (verified live).
+   Owned daemons also drop the client when `daemon.exited` fires.
+
+## auv_doctor (SDK)
+
+Report fields (plain, no jargon labels): `platform`, `daemon` `{mode, endpoint,
+daemon_id, pid, health}`, `permissions_checked`, `accessibility`,
+`screen_recording`, `screen_capture_kit`, `automation`, `all_ok`,
+`recommendation`, `error`, `warnings`. Permission statuses are AUV's
+`PERMISSION_STATUS_*` mapped to `granted` / `missing` / `unknown`. `all_ok`
+requires Accessibility granted, Screen Recording granted, and ScreenCaptureKit
+not missing; Automation is reported as optional (a missing one only adds a
+warning). On non-macOS the daemon health alone decides `all_ok`. When the daemon
+cannot be attached or started (e.g. AUV not installed), `execute` returns a
+failure report whose `error` embeds `AUV_INSTALL_GUIDANCE` and whose
+`recommendation` points at the fix — the tool never throws.
+
+## Environment variables
+
+| Variable | Meaning |
+| --- | --- |
+| `AUV_BIN`, `PATH` | AUV executable used only when the plugin must start its own daemon. |
+| `AUV_DSH_SDK_STORE_ROOT` | Owned-daemon store root; default `<DSH data>/auv/sdk`. |
+| `AUV_DSH_CAPTURE_DIR` | Directory for SDK capture `.webp` files; default `<DSH data>/auv/sdk-captures`. |
+| `DSH_HOME` | Data root for the two paths above. |
+| `AUV_LOG_DIR` | AUV's own logs (needed in the DSH bash sandbox). |
+| `AUV_ENDPOINT`, `AUV_DISCOVERY_FILE` | SDK discovery overrides; honoured for attach (normally unset). |
+
+Removed: `AUV_DSH_TRANSPORT`, `AUV_DSH_NO_DAEMON`, `AUV_DSH_OVERLAY`,
+`AUV_DSH_STORE_ROOT`, and the `AUV_DSH_*` fallback semantics.
+
+## Verification (exact commands and results)
+
+All from `/Users/liliumneko/Projects/dshplugin`; read-only tools only (no real
+clicks/typing/keys/scrolls/activation were delivered).
+
+```sh
+# 1. syntax
+for f in index.js src/auv.mjs src/tools.mjs src/transport/sdk-format.mjs src/transport/sdk.mjs tools/check-tools.mjs; do node --check "$f"; done   # OK
+
+# 2. offline self-check
+node tools/check-tools.mjs
+# RESULT: 11 checks passed, 0 failed.
+#   (9 tools / entry point / manifest + retired files / SDK mapping / attach-first & ownership /
+#    doctor helpers / no CLI-or-catalog runtime grep / discovery fast-fail / offline execute guards / bundle)
+
+# 3. bundle build
+pnpm build   # dist/index.mjs 1,445,677 bytes; gzip 315,032 bytes
+
+# 4. OWNED mode smoke (source) — no discoverable daemon, plugin starts its own
+AUV_LOG_DIR=/tmp/simplifier-sdk/logs AUV_DSH_SDK_STORE_ROOT=/tmp/simplifier-sdk/store \
+AUV_DSH_CAPTURE_DIR=/tmp/simplifier-sdk/caps AUV_DISCOVERY_FILE=/tmp/simplifier-sdk/none/api-server.json \
+  node /tmp/simplifier-sdk/owned-smoke.mjs
+# PASS windows 16 rows, daemon_mode=owned, run_id=null
+# PASS screenshot artifact under capture dir, RIFF/WEBP, byte_length 286018, 1728x1117
+# PASS OCR matches; doctor all_ok=true, mode=owned, permissions granted
+# PASS exactly one `auv serve ... --store-root /tmp/simplifier-sdk/store --no-register`
+# PASS dispose: state cleared, owned daemon process gone, idempotent
+
+# 5. ATTACH mode smoke (source) — a real discoverable daemon under /tmp
+#    (startAuv({ discoveryFile: '/tmp/simplifier-sdk/attach2/api-server.json',
+#               local: { auth: { allowedMethods: ['os-user'] } } })
+#     + AUV_DISCOVERY_FILE pointing at the descriptor = a CLI-style registered daemon)
+AUV_LOG_DIR=/tmp/simplifier-sdk/logs AUV_DSH_SDK_STORE_ROOT=/tmp/simplifier-sdk/attach2/plugin-store \
+AUV_DSH_CAPTURE_DIR=/tmp/simplifier-sdk/attach2/caps \
+  node /tmp/simplifier-sdk/attach-smoke.mjs
+# PASS attached windows (daemon_mode=attached, endpoint from descriptor, pid=null)
+# PASS doctor daemon.mode=attached; render says "attached to the running AUV daemon"
+# PASS no plugin-owned `auv serve` was started
+# PASS dispose closed only the connection; user daemon stayed healthy; descriptor removed on stop
+
+# 6. ATTACH death + recovery (source)
+AUV_LOG_DIR=/tmp/simplifier-sdk/logs AUV_DSH_SDK_STORE_ROOT=/tmp/simplifier-sdk/recover/plugin-store \
+  node /tmp/simplifier-sdk/recover-smoke.mjs
+# PASS first call after the attached daemon exits fails with AUV_UNAVAILABLE (rpc 14) and forgets the client
+# PASS the next call recovers with an owned daemon (daemon_mode=owned)
+
+# 7. BUNDLED runtime smoke (dist/index.mjs)
+AUV_LOG_DIR=/tmp/simplifier-sdk/logs AUV_DSH_SDK_STORE_ROOT=/tmp/simplifier-sdk/bundle-store \
+AUV_DSH_CAPTURE_DIR=/tmp/simplifier-sdk/bundle-caps AUV_DISCOVERY_FILE=/tmp/simplifier-sdk/none/api-server.json \
+  node /tmp/simplifier-sdk/bundle-smoke.mjs
+# PASS apply registers 9 tools; windows/doctored/screenshot region 200x120 work; dispose stops the owned daemon
+```
+
+The live attach path **is tested** in this sandbox: the SDK publishes a
+descriptor to any path via `startAuv({ discoveryFile })`, and
+`AUV_DISCOVERY_FILE` makes `connect({ discover: true })` read it. That is the
+same descriptor + `os-user` auth contract the user's CLI daemon uses; the only
+untested variant is the real `~/Library/Application Support/ai.moeru.auv/api-server.json`
+location (not writable in the DSH bash sandbox), which behaves identically.
+
+Source grep (evidence that no CLI/catalog path remains in runtime code):
+
+```sh
+grep -nE "node:child_process|\bspawn\s*\(|--no-daemon|--credential-stdin|--no-overlay|--dry-run|AUV_DSH_TRANSPORT|AUV_DSH_NO_DAEMON|AUV_DSH_OVERLAY|AUV_DSH_STORE_ROOT|catalog\.(json|mjs|data)|generate-catalog|sync-catalog|buildInvokeArgs|\brunAuv\b|auv_help|auv_invoke" \
+  index.js src/auv.mjs src/tools.mjs src/transport/sdk-format.mjs src/transport/sdk.mjs
+# (no matches)
+```
+
+## Required Lead-owned edits (not done here)
+
+1. **`package.json` scripts** — delete the now-broken catalog scripts:
+   - `"catalog": "node tools/generate-catalog.mjs"`
+   - `"catalog:sync": "node tools/sync-catalog-data.mjs"`
+   Everything else (files/exports/devDependencies) is unchanged; `@auv-js/sdk`,
+   `es-toolkit`, `tsdown` stay devDependencies and are still bundled.
+2. **`README.md` / `README.zh.md`** — update: tool table to 9 tools (drop
+   `auv_invoke`/`auv_help`); env table (drop `AUV_DSH_TRANSPORT`,
+   `AUV_DSH_NO_DAEMON`, `AUV_DSH_OVERLAY`, `AUV_DSH_STORE_ROOT`; keep
+   `AUV_DSH_SDK_STORE_ROOT`, `AUV_DSH_CAPTURE_DIR`); "Transport and daemon
+   lifecycle" section (attach-first; owned only as fallback; dispose ownership);
+   doctor now SDK-backed; remove the catalog/MCP size-comparison and
+   catalog-regeneration sections; update the build/test scripts list; bundle
+   size 1.45 MB raw / 315 kB gzip; `notes/catalog-selfcheck.mjs` no longer exists.
+3. **`locale/en.json` / `locale/zh.json`** — drop "and raw AUV commands" /
+   "以及直接调用 AUV 命令" from the descriptions.
+4. **`tsdown.config.mjs` header comment** (cosmetic only) — it still says the
+   bundle inlines "the generated AUV catalog"; that is no longer true.
+5. Suggested commit message (do not commit in this session):
+   `Refactor the plugin to an attach-first, SDK-only transport with 9 tools`
+
+## Remaining risks
+
+1. **TCC attribution differs between attached and owned daemons.** An attached
+   daemon runs with whatever permissions its launcher (terminal/CLI) has; the
+   owned daemon is a child of the DSH Host. The doctor probe reports the actual
+   capability for the daemon in use, but the Host-level TCC state should still be
+   re-verified live after the plugin reload (read-only doctor/windows/screenshot).
+2. **Attach latency bound is 2 s.** A very slow daemon start right as a tool call
+   happens can make the attach attempt time out; the plugin then starts its own
+   private daemon (safe, but the user's daemon is not used for that session).
+3. **Mutating tools were not executed** here (no real clicks/typing/keys/scrolls);
+   request shapes are unchanged from the previously verified SDK transport.
+4. **First call latency**: attach is fast (<100 ms locally); owned-daemon start is
+   ~1–5 s (15 s startup timeout).
+5. A pre-existing leaked `auv serve` from an earlier verification session
+   (`--store-root ~/.dsh/auv/sdk --no-register`, pid seen during this task) is
+   unrelated to this plugin instance; dispose only stops daemons it owns.

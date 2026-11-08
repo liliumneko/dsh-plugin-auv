@@ -4,26 +4,20 @@
 
 **English** | [简体中文](./README.zh.md)
 
-A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) Host plugin bundle that
-exposes [AUV](https://github.com/moeru-ai/auv) OS automation as eleven native model tools:
-screenshots, Vision OCR, clicks, typing, key presses, scrolling, window listing, app activation, a
-raw command escape hatch, a readiness check, and catalog help. The eight typed tools run over
-AUV's official [`@auv-js/sdk`](https://www.npmjs.com/package/@auv-js/sdk) client (an app-owned AUV
-daemon started by the plugin), with the historical `auv invoke` CLI kept as a fallback.
+Adds [AUV](https://github.com/moeru-ai/auv) desktop automation to
+[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) as native model tools.
+
+The plugin uses AUV's official `@auv-js/sdk`. On the first call it connects to a running AUV
+daemon if one exists; only if none is reachable does it start a private daemon of its own. It
+never runs the `auv` command line.
 
 > [!WARNING]
-> **Installing this plugin alone does nothing.** It is only the DeepSeek Harness ↔ AUV bridge.
-> Before the tools can automate anything you must install the external **AUV CLI** and grant
-> macOS permissions to **DeepSeek Harness** — see [Before you start](#before-you-start).
-> Until then the tools still load, but every call returns actionable setup instructions instead of
-> working (`auv_doctor` reports what is missing).
+> **Install AUV before using this plugin.** On macOS, also grant **DeepSeek Harness** the required
+> permissions. See [Before you start](#before-you-start).
 
 ## Before you start
 
-The plugin has three external prerequisites. Skipping any of them is the most common reason the
-tools appear to "do nothing".
-
-1. **Install the AUV CLI and put it on `PATH`.** Check with `auv --version`.
+1. **Install the AUV command line tool and make sure it is on `PATH`.** Check with `auv --version`.
 
    | Platform | Install |
    | --- | --- |
@@ -31,376 +25,222 @@ tools appear to "do nothing".
    | macOS / Linux | `curl -fsSL https://auv.moeru.ai/install.sh \| sh` |
    | Windows | `scoop bucket add auv https://github.com/moeru-ai/auv` then `scoop install auv/auv` |
    | proto | `proto plugin add auv "https://raw.githubusercontent.com/moeru-ai/auv/main/toolchain/proto/auv.toml" --to global` then `proto install auv latest --config-mode global --pin global` |
-   | Cargo / Nix | see the [AUV install guide](https://github.com/moeru-ai/auv#install) |
 
-   If AUV lives outside `PATH`, set `AUV_BIN` to the absolute executable path before starting
-   Harness.
+   If AUV is not on `PATH`, set `AUV_BIN` to the full path of the `auv` executable before starting
+   Harness. A running AUV daemon is enough for the plugin to connect, but starting one itself
+   needs the executable.
 
-2. **Grant macOS permissions to DeepSeek Harness** (not to `auv`, not to Terminal):
-   - **Accessibility** — needed to click, type, press keys, scroll, and focus applications.
-   - **Screen Recording** — needed for screenshots and OCR.
-   - macOS 27+ merges the permission lists into **System Settings → Privacy & Security → Device
-     Control and Data Access**; older macOS shows **Accessibility** and **Screen Recording** as
-     separate rows. Enable `DeepSeek Harness.app` there (add it with `+` if it is missing).
-   - **Quit and restart DeepSeek Harness** after granting; permissions are only read at process
-     start.
+2. **Install and enable this plugin** (see [Install](#install)), then run `auv_doctor`. A ready
+   setup reports `all_ok: true`.
 
-3. **Install and enable this plugin** in the `desktop` profile (see [Install](#install)), then run
-   `auv_doctor`. A ready host reports `all_ok: true`.
+## What is AUV
 
-## What is AUV?
+**AUV** means *Application Use Via ...*. Its authors describe it as programmable computer use — like
+Playwright, but for the operating system.
 
-**AUV** means *Application Use Via ...*: a unified orchestration layer for OS automation, described
-by its authors as "programmable computer use, more like Playwright for the OS".
+- It is not an agent. It provides a command line tool, a local daemon, a stdio MCP server, typed
+  command contracts and TypeScript/Rust SDKs. An agent or app calls it.
+- Repeated GUI work becomes reusable commands that record runs and artifacts, instead of a
+  screenshot → click → check loop. Once a flow is a command, repeating it costs almost no model
+  tokens.
+- macOS, Linux and Windows are supported. AUV 0.0.43 has 43 core commands for displays, windows,
+  input, accessibility, media and scans.
 
-- It is **not an agent**. AUV ships a CLI, a stdio MCP server, a local daemon, typed command
-  contracts (Protobuf/gRPC), and TypeScript/Rust SDKs. Agents call it; it never decides for you.
-- Repeated GUI work becomes **reusable, inspectable commands** (`auv invoke <command-id>`) that
-  produce recorded Runs and artifacts, instead of a token-expensive screenshot → click → verify
-  loop. Once a flow is a command, repeated execution costs no reasoning tokens.
-- Platform support: macOS, Linux, and Windows; 43 core commands in AUV 0.0.43 covering displays,
-  windows, input, accessibility, media, and scans.
-
-Useful AUV links:
+Links:
 
 - Repository: <https://github.com/moeru-ai/auv>
-- Documentation / install site: <https://auv.moeru.ai>
+- Docs and install: <https://auv.moeru.ai>
 - Terms and concepts: <https://github.com/moeru-ai/auv/blob/main/docs/TERMS_AND_CONCEPTS.md>
 - Supported apps and extensions: <https://github.com/moeru-ai/auv/tree/main/supported>
 
-**Navigation:** [Before you start](#before-you-start) · [Install](#install) ·
-[macOS permissions](#macos-permissions) · [Tools](#tools) · [Configuration](#configuration) ·
-[Examples](#examples) · [Why a native plugin](#why-a-native-plugin-instead-of-the-mcp-bridge) ·
-[Troubleshooting](#troubleshooting) · [Development](#development) · [Attribution](#attribution)
+Sections: [Before you start](#before-you-start) · [Install](#install) · [macOS permissions](#macos-permissions) · [Tools](#tools) · [Configuration](#configuration) · [Daemon](#daemon-lifecycle) · [Why not MCP](#why-not-the-mcp-bridge) · [Troubleshooting](#troubleshooting) · [Development](#development)
 
 ## Install
 
-This repository *is* the plugin bundle package. The runtime artifact is the prebuilt single file
-`dist/index.mjs` (built with [tsdown](https://tsdown.dev); no runtime npm dependencies), committed
-to the repository, so cloning and installing needs no build step.
+The built plugin is already in this repository as a single file, `dist/index.mjs`. There is no
+build step and no runtime npm dependency, so you can install it straight from GitHub without
+cloning.
 
-1. Install AUV, grant permissions, and restart Harness — see [Before you start](#before-you-start).
-2. Clone this repository anywhere:
+In the app, open **Settings → Plugins → Add plugin** and enter the repository address:
 
-   ```sh
-   git clone https://github.com/liliumneko/dsh-plugin-auv.git
-   ```
+```
+https://github.com/liliumneko/dsh-plugin-auv
+```
 
-3. Install the bundle into the current DSH profile, pointing at the clone:
+Click install, then enable **AUV desktop automation**. The nine `auv_*` tools show up on the next
+model step. Run `auv_doctor` first.
 
-   ```
-   plugin_manager action=install_bundle target=/absolute/path/to/dsh-auv
-   ```
+The dialog also accepts an npm package name or a local directory; here the GitHub repository
+address is enough. If GitHub is slow, switch the install source in the same dialog.
 
-   The equivalent UI path is **Settings → Plugins → Add plugin → Install from directory**, then
-   enable the **AUV desktop automation** row.
-4. The eleven `auv_*` tools appear for the next model step. Run `auv_doctor` to confirm the
-   prerequisites; a machine that is ready reports `all_ok: true`.
+From a session you can use the command form instead, with the same address as `target`:
 
-The bundle is installed as a linked local directory: `git pull` and restart Harness to update.
-Disable it with `plugin_manager action=set_plugin target=dsh-auv enabled=false`.
+```
+plugin_manager action=install_bundle target=https://github.com/liliumneko/dsh-plugin-auv
+```
+
+To change the code, clone the repository, run `pnpm install`, and install the local directory:
+
+```
+git clone https://github.com/liliumneko/dsh-plugin-auv.git
+plugin_manager action=install_bundle target=/absolute/path/to/dsh-plugin-auv
+```
+
+A local directory install is a linked directory. Rebuild with `pnpm build` and restart Harness
+after code changes. Disable it with
+`plugin_manager action=set_plugin target=dsh-auv enabled=false`.
 
 ## macOS permissions
 
-AUV drives the real desktop, so macOS must trust the **DeepSeek Harness** app, not just `auv`:
+AUV controls the real desktop, so macOS must trust **DeepSeek Harness**, not just `auv`:
 
-1. Open **System Settings → Privacy & Security**. On macOS 27+ the individual permission lists are
-   merged into **Device Control and Data Access** (Chinese: 设备控制与数据访问); on older macOS open
-   **Accessibility** and **Screen Recording** as separate rows.
-2. Enable **DeepSeek Harness** in that permission list (the macOS 27+ pane shows one switch per
-   app). If the app is missing, click `+` and choose `/Applications/DeepSeek Harness.app`, or
-   trigger an input command once and approve the prompt.
-3. **Quit and restart DeepSeek Harness** (permission grants are only read at process start).
-4. Run `auv_doctor` and confirm `all_ok: true`; `permission.probe` should report
-   `accessibility: granted` and `screen_recording: granted`.
+1. Open **System Settings → Privacy & Security**. On macOS 27 and later the permission lists are
+   under **Device Control and Data Access**; older versions show **Accessibility** and
+   **Screen Recording** separately.
+2. Enable **DeepSeek Harness** there. If it is not listed, add
+   `/Applications/DeepSeek Harness.app`, or trigger an input command once and allow the prompt.
+3. Quit and reopen DeepSeek Harness. Permission changes are only read when the process starts.
+4. Run `auv_doctor`. `all_ok` should be `true`; the report shows which permission is missing
+   otherwise.
 
-| Permission | Needed for |
-| --- | --- |
-| Accessibility | `auv_click`, `auv_type`, `auv_keys`, `auv_scroll`, `auv_activate`, and any other input action |
-| Screen Recording | `auv_screenshot`, `auv_ocr`, and the OCR step inside text-based `auv_click` |
-
-Capturing can still work when Screen Recording is missing (AUV falls back to a non-permissioned
-backend), but OCR fails with `vision OCR failed …` until it is granted.
+Screenshots and OCR need Screen Recording. Clicking, typing, key presses and scrolling need
+Accessibility.
 
 ## Tools
 
-All tools run `auv` asynchronously, enforce a timeout, and are marked non-concurrency-safe because
-OS input is mutually exclusive. Errors carry the AUV failure code plus a permission hint where
-relevant; a missing AUV returns copy-pasteable install instructions.
+All nine tools talk to AUV through the SDK. Every call validates its arguments first, then uses the
+daemon connection (see [Daemon lifecycle](#daemon-lifecycle)).
 
-| Tool | What it does | AUV command(s) |
-| --- | --- | --- |
-| `auv_doctor` | Reports platform, Accessibility/Screen Recording state, capture backend, `all_ok`, recommendation | `auv doctor --json` |
-| `auv_screenshot` | Captures the desktop, a window, an application, a display, or a screen region; returns `artifact_path` for `read_image` | `display.capture`, `display.captureRegion`, `window.capture` |
-| `auv_ocr` | Finds text on screen or in a window; optionally polls (`wait: true`) for it | `display.findText`, `window.findText`, `display.waitForText`, `window.waitForText` |
-| `auv_click` | Clicks OCR text or an exact point, with optional target/display/button/fence | `display.clickText`, `window.clickText`, `input.clickPoint` |
-| `auv_type` | Types or pastes text into the focused control | `input.typeText`, `input.pasteText` |
-| `auv_keys` | Presses one key combination, optionally repeated | `input.pressKeys` |
-| `auv_scroll` | Scrolls inside a window, or at a screen point (Linux/Windows only) | `window.scroll`, `input.scrollPoint` |
-| `auv_windows` | Lists switchable windows with ids, app ids, titles, frames, state | `window.list` |
-| `auv_activate` | Brings an application to the foreground | `application.activate` |
-| `auv_invoke` | Runs any AUV command with typed inputs and an optional target | any catalog command |
-| `auv_help` | Lists all command ids, or detailed arguments/examples for one | none (catalog only) |
+| Tool | What it does |
+| --- | --- |
+| `auv_doctor` | Reports permissions, daemon state and whether the setup is ready. Returns install and permission guidance when something is missing; it does not throw. |
+| `auv_screenshot` | Captures the desktop, a window, an app, a display or a screen region. Returns a `.webp` file path for `read_image`. |
+| `auv_ocr` | Finds text on screen or in a window. With `wait: true` it polls until the text appears. |
+| `auv_click` | Clicks text found by OCR, or an exact point. Optional button, target and click area. |
+| `auv_type` | Types or pastes text into the focused control. |
+| `auv_keys` | Presses one key combination, optionally repeated. |
+| `auv_scroll` | Scrolls inside a window, using window-local coordinates. |
+| `auv_windows` | Lists windows with ids, app ids, titles, frames and state. |
+| `auv_activate` | Brings an application to the front. |
 
-### Window and display targeting
-
-AUV 0.0.43 does not accept `window:<id>` on `window.capture`, `window.findText`,
-`window.waitForText`, or `window.clickText` — those commands accept an application target plus an
-optional `--title`. The plugin therefore resolves a `window_id` through `window.get` first (cached
-for 30 seconds) and then calls the window command with `app:<application_id>` and the window title.
-
-`display.*` commands forbid `--target` entirely. A `display_id` passed to `auv_screenshot` is
-resolved through `display.list` and captured with `display.captureRegion` using the display frame.
-
-`auv_scroll` without `window_id` maps to `input.scrollPoint`, which exists only on Linux and
-Windows; on macOS it fails fast with an actionable error. Pass `window_id` instead.
-
-`auv_invoke` can run every catalog command, but `dry_run` is not a universal no-side-effect flag:
-`auv invoke application.activate --dry-run` still activates the application.
+Screenshots are saved as `.webp` files. Call DSH's `read_image` tool with the returned path to
+look at one; the tool result never contains image bytes.
 
 ## Configuration
 
 | Variable | Default | Effect |
 | --- | --- | --- |
-| `AUV_DSH_TRANSPORT` | `auto` | Transport selection: `auto` (SDK first, permanent CLI fallback when the owned daemon cannot start), `sdk` (require the SDK; startup errors surface), `cli` (never start the SDK daemon). |
-| `AUV_DSH_SDK_STORE_ROOT` | `$DSH_HOME/auv/sdk` (usually `~/.dsh/auv/sdk`) | Store root and socket state for the plugin-owned SDK daemon. |
-| `AUV_DSH_CAPTURE_DIR` | `$DSH_HOME/auv/sdk-captures` (usually `~/.dsh/auv/sdk-captures`) | Where SDK-mode screenshots are written as `.webp` files for `read_image`. |
-| `AUV_BIN` | resolved from `PATH`, then `/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin`, `~/.cargo/bin` | Absolute path to the `auv` executable. Invalid values fail fast with install instructions. |
-| `AUV_DSH_STORE_ROOT` | `$DSH_HOME/auv/runs` (usually `~/.dsh/auv/runs`) | CLI-path `--store-root`, so CLI run receipts and `.webp` artifacts have stable paths. |
-| `AUV_DSH_NO_DAEMON` | unset (use the local AUV daemon) | CLI-path root option `--no-daemon` for every `auv invoke` (the SDK transport ignores it). |
-| `AUV_DSH_OVERLAY` | unset (overlays off) | `1`/`true`/`yes` leaves AUV's live visual overlays enabled; by default the plugin passes `--no-overlay`. |
+| `AUV_BIN` | searched in `PATH`, then `/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin`, `~/.cargo/bin` | Full path to the `auv` executable. Needed only when the plugin has to start its own daemon. Invalid values fail with install instructions. |
+| `AUV_DSH_SDK_STORE_ROOT` | `$DSH_HOME/auv/sdk` (usually `~/.dsh/auv/sdk`) | Store directory for the daemon the plugin starts itself. |
+| `AUV_DSH_CAPTURE_DIR` | `$DSH_HOME/auv/sdk-captures` (usually `~/.dsh/auv/sdk-captures`) | Where screenshots are written for `read_image`. |
 
-The `auv` child process inherits the Harness environment and gets
-`/opt/homebrew/bin:/usr/local/bin` appended to `PATH`, so a GUI-launched Harness can find a
-Homebrew-installed AUV.
+AUV's own `AUV_ENDPOINT` and `AUV_DISCOVERY_FILE` are honored when finding a daemon to connect to.
+`DSH_HOME` changes the default data directory above.
 
-## Transport and daemon lifecycle
+## Daemon lifecycle
 
-The plugin has two interchangeable transports:
+The plugin does not start a daemon if you already have one.
 
-- **SDK (default, `AUV_DSH_TRANSPORT=auto`)** — on the first typed tool call it lazily starts an
-  **app-owned `auv serve` daemon** through `@auv-js/sdk` (`startAuv()`), then talks to it over a
-  typed gRPC client. The daemon binds a private unix socket under `TMPDIR`, uses launcher-token
-  authentication, runs with `--no-register` (it never replaces or collides with your own
-  `auv serve`), and uses `--exit-on-stdin-close` so it dies with the Harness process. Plugin
-  unload/reload stops it through `ctx.effect`; a `globalThis` singleton prevents reload leaks.
-  The first call includes daemon startup and lazy Runner creation (roughly 1–5 s); later calls are
-  fast.
-- **CLI (`AUV_DSH_TRANSPORT=cli`, or automatic fallback)** — the historical one-`auv invoke`
-  child process per call, with the same behavior and artifact/keychain semantics as before.
+- **First tool call:** it looks for a running AUV daemon and connects to it (about two seconds at
+  most). If none is found, it starts a private `auv serve` process: its own socket, a launcher
+  token, no registration in AUV's discovery file, and it exits when Harness exits. Only in this
+  case does it need the `auv` executable.
+- **Later calls:** reuse the same connection. When the daemon goes away, the next call connects
+  again or starts a new one.
+- **Unload or reload:** the connection is closed. A daemon started by the plugin is stopped; a
+  daemon you started yourself keeps running.
+- **Doctor:** tells you whether it is connected to an existing daemon or using one it started, and
+  where that daemon listens.
 
-`AUV_DSH_TRANSPORT=auto` (the default) falls back to the CLI permanently for the process after
-**one** warning if the SDK daemon cannot start. `sdk` surfaces the startup error instead of
-falling back.
-
-`auv_doctor`, `auv_invoke` and `auv_help` stay on the CLI/catalog paths (the SDK has no doctor
-report and speaks typed RPCs, not CLI argv). In SDK mode `auv_doctor`/`auv_invoke` reuse the
-already-running owned daemon via `AUV_ENDPOINT` + `--credential-stdin`; `auv_doctor` never forces
-the daemon to start.
-
-Semantic differences between modes:
-
-| Aspect | SDK transport | CLI transport |
-| --- | --- | --- |
-| Screenshots | `CaptureResolution.LOGICAL` (1 px per point) bounded to 2048², written by the plugin to `AUV_DSH_CAPTURE_DIR` as `.webp` | AUV's native capture (2× on Retina) persisted by AUV under `AUV_DSH_STORE_ROOT` |
-| `run_id` in tool results | `null` — no CLI-style Run/trace record per call (no per-call Run is created in v1) | AUV Run id with persisted run/artifact records |
-| `window_id` targeting | Exact `WindowClient` binding for capture/findText/click/type/keys/scroll | CLI `window.capture`/`findText`/`clickText` need `app:` + `--title`, so the plugin resolves the window first |
-| `auv_ocr wait: true` | Client-side `findText` polling (fresh capture per poll) | `display.waitForText`/`window.waitForText` |
-| Mutating input | Typed calls; no `--dry-run` equivalent | `auv invoke` argv with `--dry-run` support |
+Screenshots use logical resolution (one pixel per screen point) and are capped at 2048×2048. The
+SDK does not create AUV runs per call, so tool results have `run_id: null`; that differs from the
+old command line based version.
 
 ## Examples
 
 ```
 auv_doctor {}
-```
-
-```
 auv_windows {}
-```
-
-```
 auv_screenshot { "window_id": "<id from auv_windows>" }
-# → { artifact_path: ".../….webp", width: 1886, height: 1190, ... }
-# then: read_image { "file_path": "<artifact_path>" }
-```
-
-```
-auv_ocr { "text": "Save", "application_id": "com.apple.TextEdit", "wait": true, "timeout_ms": 5000 }
-```
-
-```
+# then read_image { "file_path": "<artifact_path>" }
+auv_ocr { "text": "Save" }
 auv_click { "text": "Save", "application_id": "com.apple.TextEdit" }
-```
-
-```
 auv_type { "text": "hello", "application_id": "com.apple.TextEdit", "mode": "paste" }
-```
-
-```
-auv_keys { "keys": ["cmd", "shift", "t"] }
-```
-
-```
 auv_keys { "keys": ["cmd", "t"], "repeat": 3, "interval_ms": 120 }
-# repeat > 1 sends --count plus --interval-ms (default 50 ms); AUV requires both.
-```
-
-```
 auv_scroll { "window_id": "<id from auv_windows>", "dy": 600 }
 ```
 
-```
-auv_invoke { "command_id": "display.list" }
-```
+## Why not the MCP bridge
 
-```
-auv_help { "command_id": "display.findText" }
-```
+AUV ships `auv mcp serve`, and `@deepseek-ai/dsh-mcp-client` can connect it with no code. That
+connection loads AUV's full MCP schema every request: measured 181,539 bytes pretty / 117,422 bytes
+compact on AUV 0.0.43, about 29k tokens, most of it the command list inside the single `invoke`
+tool.
 
-## Why a native plugin instead of the MCP bridge
-
-AUV already ships `auv mcp serve`, and connecting it through `@deepseek-ai/dsh-mcp-client` works
-with zero code. That route, however, exposes AUV's full MCP schema set: measured 181,539 bytes
-pretty / 117,422 bytes compact on AUV 0.0.43 — about 29k tokens of tool schemas in **every** model
-request, most of it AUV's embedded 74 KB command catalog inside a single `invoke` tool.
-
-This bundle registers eleven focused tools whose schemas total **13,392 bytes (≈3.3k tokens)** —
-about **8.8× smaller** than the MCP bridge's compact schema set — with no extra process and no MCP
-handshake. The command catalog lives on disk (43 commands, generated from the AUV MCP server and
-cross-checked against `auv invoke <id> --help`) and is used to build argv locally, while
-`auv_help` exposes it to the model on demand. The runtime is one tsdown-built `dist/index.mjs`
-(1.58 MB raw / 338 KB gzip) that inlines the typed SDK and its gRPC client, so the plugin has no
-runtime npm dependencies. Screenshot artifacts are `.webp` files read through DSH's own
-`read_image` tool.
+This plugin has nine tools whose schemas total 10,645 bytes, about 2.7k tokens — roughly 11 times
+smaller — and there is no separate MCP process or handshake. The full bundle is 1.45 MB on disk
+(315 kB gzip) because the SDK and its gRPC client are included; it is loaded once and does not add
+to the model context.
 
 ## Troubleshooting
 
-### `AUV was not found` / `AUV_BIN is not an executable file`
+**`AUV was not found` / `AUV_BIN` is not an executable file.** The plugin cannot find the `auv`
+executable. Install AUV as described in [Before you start](#before-you-start), check
+`auv --version`, and restart Harness. If AUV is outside `PATH`, set `AUV_BIN`.
 
-The plugin cannot find the external CLI. Install AUV (see [Before you start](#before-you-start)),
-confirm `auv --version`, and restart Harness. The error message includes every install command and
-the repository link; `auv_doctor` returns the same instructions.
+**The plugin is installed but nothing happens.** Run `auv_doctor`. It reports whether AUV is found,
+whether it can connect to a daemon, and which macOS permission is missing.
 
-### The plugin is installed but no tool does anything
+**Daemon connection errors.** If a daemon is running but the plugin cannot use it, run
+`auv_doctor` to see the endpoint and the error. Make sure `AUV_DSH_SDK_STORE_ROOT` is writable when
+the plugin has to start its own daemon. The plugin never replaces or stops a daemon you started.
 
-Check the three prerequisites, in order: AUV installed, **DeepSeek Harness** holding Accessibility
-and Screen Recording, Harness restarted after the grant. `auv_doctor` reports exactly what is
-missing.
+**Permission errors.** Follow [macOS permissions](#macos-permissions), then restart Harness and run
+`auv_doctor` again.
 
-### SDK daemon fails to start
+**OCR returns `vision OCR failed …`.** Screen Recording is missing or the grant has not taken
+effect yet. Grant it, restart Harness and retry. Until then, use `auv_screenshot` plus `read_image`.
 
-With `AUV_DSH_TRANSPORT=auto` the plugin logs one warning and permanently uses the CLI transport
-for that process; tools keep working. Set `AUV_DSH_TRANSPORT=cli` to skip the SDK startup attempt
-entirely, or `AUV_DSH_TRANSPORT=sdk` to surface the startup error (useful for debugging). Make
-sure `AUV_DSH_SDK_STORE_ROOT` is writable and no stale `auv serve` from this plugin is holding
-state. The owned daemon is private (`--no-register`), so it does not conflict with the user's own
-AUV daemon.
+**`auv_ocr` with `wait: true` times out.** The SDK version polls `findText` on the client. If the
+text is still loading, a shorter `timeout_ms` retry usually works better than a long wait.
 
-### Daemon / socket errors
-
-The plugin uses the local AUV daemon by default (AUV autostarts it on demand). If the Host cannot
-start or reach the daemon, set `AUV_DSH_NO_DAEMON=1` in the environment that launches DeepSeek
-Harness and restart the app; each invocation then runs in-process (`auv --no-daemon invoke …`).
-
-### `permission` / `TCC` / `accessibility` errors
-
-Run `auv_doctor`. If `accessibility` or `screen_recording_preflight` is not granted, enable
-**DeepSeek Harness** under **System Settings → Privacy & Security** (macOS 27+: the merged
-**Device Control and Data Access** pane; older macOS: the **Accessibility** and **Screen Recording**
-rows), then restart the app.
-
-### OCR fails with `vision OCR failed …`
-
-That is missing Screen Recording. Grant it, restart Harness, and re-run `auv_doctor`. A stale
-permission state that still reports `vision OCR failed: unknownError` means the grant has not taken
-effect for the Host process yet; restart and retry. Until OCR is available, use `auv_screenshot`
-plus `read_image`, or accessibility-based commands.
-
-### `auv_ocr` with `wait: true` times out
-
-AUV 0.0.43 `display.waitForText` can time out even when `display.findText` finds the same text, and
-`window.waitForText` has been observed to hang on some windows. The plugin maps to these commands
-one-to-one (the same argv fails from the CLI), so this is an upstream AUV quirk. Prefer `auv_ocr`
-without `wait` and retry, keeping `timeout_ms` short.
-
-### The screenshot path is not readable
-
-The plugin returns an absolute path inside `AUV_DSH_STORE_ROOT`. Pass that exact path to the
-`read_image` tool; image bytes are never returned by the tool result.
+**A screenshot path cannot be read.** Pass the exact absolute path to `read_image`. Files older
+than seven days are pruned.
 
 ## Development
 
-Source lives in `index.js` + `src/` as plain ESM. The runtime artifact is one self-contained file,
-**`dist/index.mjs`**, built with [tsdown](https://tsdown.dev) (Rolldown): the tool definitions, the
-generated AUV catalog, and the [es-toolkit](https://es-toolkit.dev) helpers are inlined, while Node
-builtins stay external. There are no runtime npm dependencies, and `dist/` is committed so a
-directory install does not need a build step.
+The source is plain ESM in `index.js` and `src/`. The runtime artifact is one file,
+`dist/index.mjs`, built with [tsdown](https://tsdown.dev). It includes the nine tool definitions,
+the SDK transport and the `es-toolkit` helpers; Node builtins stay external. There are no runtime
+npm dependencies, and `dist/` is committed so a directory install does not need a build.
 
 ```sh
-pnpm install                        # dev-only tooling (tsdown, es-toolkit)
-pnpm build                          # tsdown -> dist/index.mjs (commit the result)
-pnpm check                          # offline checks: source, manifest, catalog mirror, bundle
-node notes/catalog-selfcheck.mjs    # catalog argv self-check (43 commands)
+pnpm install
+pnpm build     # write dist/index.mjs
+pnpm check     # offline checks: tools, manifest, SDK mapping, attach logic, bundle
 ```
 
-Catalog maintenance after an AUV upgrade:
-
-```sh
-node tools/generate-catalog.mjs     # refresh src/catalog.json (MCP + CLI cross-check)
-node tools/sync-catalog-data.mjs    # mirror src/catalog.json -> src/catalog-data.mjs (runtime data)
-pnpm build                          # rebuild the single-file bundle
-```
-
-`src/catalog.json` is generated from `auv mcp serve` and cross-checked against
-`auv invoke <id> --help`; `src/catalog.mjs` validates input keys, builds argv, and produces the
-`auv_help` text. `src/catalog-data.mjs` is the generated ESM mirror that the bundle inlines.
-
-## Repository layout
-
-```
-package.json          bundle manifest (dsh.bundle.patch, exports "." -> dist/index.mjs)
-cordis.patch.yml      Loader patch inserting the dsh-auv row
-index.js              plugin entry source: inject ['tools'] + apply() registering the eleven tools
-src/auv.mjs           binary discovery + install guidance, spawn runner, timeout/abort, receipt errors
-src/catalog.json      generated AUV command catalog (43 commands, AUV 0.0.43)
-src/catalog-data.mjs  generated ESM mirror of catalog.json, inlined by the bundler
-src/catalog.mjs       argv builder, target formatting, catalog help text
-src/tools.mjs         the eleven ToolDefinitions (SDK first, unchanged CLI bodies as fallback)
-src/transport/        @auv-js/sdk transport: daemon lifecycle, typed ops, config, formatters
-dist/index.mjs        prebuilt single-file runtime bundle (tsdown; commit this)
-tsdown.config.mjs     bundler configuration
-locale/en.json        plugin title/description (English)
-locale/zh.json        plugin title/description (Chinese)
-icon.svg              official AUV logo on a white rounded background
-tools/                maintainer scripts (offline checks, catalog generator, data mirror)
-notes/                design/verification evidence (CLI contract, SDK API map, SDK transport)
-DESIGN.md             the build specification used for this integration
-```
-
-The DSH loader imports `dist/index.mjs` through `package.json` `exports["."]`; the static DSH
-resources (`cordis.patch.yml`, `locale/`, `icon.svg`) are never bundled.
+The current bundle is 1,445,677 bytes (315,032 bytes gzip). Attach behavior and daemon ownership
+are covered by the offline checks; they use fake transport dependencies, so no daemon is needed.
 
 ## Status
 
-Verified end-to-end on macOS 27.2 with AUV 0.0.43 and DeepSeek Harness: all eleven tools through
-the live Host process, including real input delivery (`auv_click` → `auv_type` → `auv_keys`
-typing and sending a message in the Harness composer), screenshot → `read_image`, OCR, window and
-display targeting, and negative/argument cases. The SDK transport was verified live in the DSH
-Host on the same host: the plugin-owned daemon starts with `--no-register`, typed
-`window.list`/`capture`/`recognizeText` work, screenshots land in `~/.dsh/auv/sdk-captures` and
-display through `read_image`, CLI routing at the owned daemon works for `auv_invoke`, and the
-daemon process was observed as `auv serve … --local-socket … --no-register`. Evidence:
-[`notes/verification-report.md`](notes/verification-report.md),
-[`notes/sdk-transport.md`](notes/sdk-transport.md),
-[`notes/sdk-api-map.md`](notes/sdk-api-map.md).
+Tested on macOS 27.2 with AUV 0.0.43 and DeepSeek Harness. The nine tools were checked with
+read-only calls (doctor, windows, screenshot → `read_image`, OCR) in both modes: connecting to a
+running daemon, and starting the plugin's own daemon. The daemon was stopped on unload when the
+plugin had started it, and left running when it had not. Input tools (click, type, keys, scroll,
+activate) were tested by argument validation and earlier CLI-based tests; they were not re-run as
+real desktop input in this version.
+
+Historical evidence, including the older CLI implementation and the SDK API research, is in
+[`notes/`](notes/).
 
 ## Attribution
 
 The plugin icon is the official AUV logo (`docs/assets/logo-light.svg` in the
-[AUV repository](https://github.com/moeru-ai/auv)) placed on a white rounded background. AUV and the
-AUV logo are © the moeru-ai contributors and licensed under
-[Apache-2.0](https://github.com/moeru-ai/auv/blob/main/LICENSE.md). Everything else in this
-repository is part of this integration.
+[AUV repository](https://github.com/moeru-ai/auv)) on a white rounded background. AUV and the AUV
+logo are © the moeru-ai contributors and licensed under
+[Apache-2.0](https://github.com/moeru-ai/auv/blob/main/LICENSE.md).
 
 ## License
 

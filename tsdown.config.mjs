@@ -2,8 +2,8 @@
  * tsdown configuration for the dsh-auv Host plugin bundle.
  *
  * The published/installed artifact is one self-contained ESM file,
- * `dist/index.mjs`: the tool definitions, the generated AUV catalog, and the
- * es-toolkit helpers are inlined, while Node builtins stay external. Static
+ * `dist/index.mjs`: the nine tool definitions, the @auv-js/sdk transport and
+ * the es-toolkit helpers are inlined, while Node builtins stay external. Static
  * DSH resources (`cordis.patch.yml`, `locale/*.json`, `icon.svg`) are not
  * bundled and stay next to the manifest.
  *

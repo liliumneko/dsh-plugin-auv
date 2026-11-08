@@ -50,8 +50,6 @@
   "scripts": {
     "build": "tsdown",
     "build:watch": "tsdown --watch",
-    "check": "node tools/check-tools.mjs",
-    "catalog": "node tools/generate-catalog.mjs",
-    "catalog:sync": "node tools/sync-catalog-data.mjs"
+    "check": "node tools/check-tools.mjs"
   }
 }
