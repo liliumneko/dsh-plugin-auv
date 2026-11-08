@@ -153,9 +153,7 @@ vite.config.ts.timestamp-*
 .auvtest/
 .DS_Store
 
-# tsdown output is committed for direct directory install
-!dist/
-!dist/index.mjs
+# the runtime bundle is built by CI and shipped in the release tarball
 # local pnpm/bundler caches
 .pnpm-store/
 .cache/

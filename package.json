@@ -50,6 +50,8 @@
   "scripts": {
     "build": "tsdown",
     "build:watch": "tsdown --watch",
-    "check": "node tools/check-tools.mjs"
-  }
+    "check": "node tools/check-tools.mjs",
+    "prepack": "pnpm build"
+  },
+  "packageManager": "pnpm@11.20.0"
 }

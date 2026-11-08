@@ -1,4 +1,4 @@
-<p align="right"><img src="icon.svg" width="72" alt="AUV desktop automation"></p>
+<img src="icon.svg" width="72" alt="AUV desktop automation"/>
 
 # dsh-auv — AUV desktop automation for DeepSeek Harness
 
@@ -7,13 +7,11 @@
 Adds [AUV](https://github.com/moeru-ai/auv) desktop automation to
 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) as native model tools.
 
-The plugin uses AUV's official `@auv-js/sdk`. On the first call it connects to a running AUV
-daemon if one exists; only if none is reachable does it start a private daemon of its own. It
-never runs the `auv` command line.
+Uses [`@auv-js/sdk`](https://www.npmjs.com/package/@auv-js/sdk).
 
 > [!WARNING]
-> **Install AUV before using this plugin.** On macOS, also grant **DeepSeek Harness** the required
-> permissions. See [Before you start](#before-you-start).
+> **Please install AUV before using this plugin.** On macOS, also grant **DeepSeek Harness** the
+> required permissions. See [Before you start](#before-you-start).
 
 ## Before you start
 
@@ -57,37 +55,40 @@ Sections: [Before you start](#before-you-start) · [Install](#install) · [macOS
 
 ## Install
 
-The built plugin is already in this repository as a single file, `dist/index.mjs`. There is no
-build step and no runtime npm dependency, so you can install it straight from GitHub without
-cloning.
+The plugin is prebuilt. The release tarball contains only the files the plugin needs at runtime
+(about 330 KB): `dist/index.mjs`, the manifest, the plugin patch, locales and the icon.
 
-In the app, open **Settings → Plugins → Add plugin** and enter the repository address:
+Open **Settings → Plugins → Add plugin** and paste the latest release tarball:
 
 ```
-https://github.com/liliumneko/dsh-plugin-auv
+https://github.com/liliumneko/dsh-plugin-auv/releases/latest/download/dsh-plugin-auv.tgz
 ```
 
 Click install, then enable **AUV desktop automation**. The nine `auv_*` tools show up on the next
 model step. Run `auv_doctor` first.
 
-The dialog also accepts an npm package name or a local directory; here the GitHub repository
-address is enough. If GitHub is slow, switch the install source in the same dialog.
+The same input box also accepts an npm package name or a local directory. The repository itself
+does not contain the built bundle, so installing from the repository address does not work; use
+the release tarball, or build from a clone for development.
 
-From a session you can use the command form instead, with the same address as `target`:
+From a session you can use the command form with the same link:
 
 ```
-plugin_manager action=install_bundle target=https://github.com/liliumneko/dsh-plugin-auv
+plugin_manager action=install_bundle target=https://github.com/liliumneko/dsh-plugin-auv/releases/latest/download/dsh-plugin-auv.tgz
 ```
 
-To change the code, clone the repository, run `pnpm install`, and install the local directory:
+To change the code, clone the repository, install and build it, then install the local directory:
 
 ```
 git clone https://github.com/liliumneko/dsh-plugin-auv.git
+cd dsh-plugin-auv
+pnpm install
+pnpm build
 plugin_manager action=install_bundle target=/absolute/path/to/dsh-plugin-auv
 ```
 
-A local directory install is a linked directory. Rebuild with `pnpm build` and restart Harness
-after code changes. Disable it with
+A local directory install is linked, so rebuild with `pnpm build` and restart Harness after code
+changes. Disable the plugin with
 `plugin_manager action=set_plugin target=dsh-auv enabled=false`.
 
 ## macOS permissions
@@ -178,9 +179,9 @@ compact on AUV 0.0.43, about 29k tokens, most of it the command list inside the 
 tool.
 
 This plugin has nine tools whose schemas total 10,645 bytes, about 2.7k tokens — roughly 11 times
-smaller — and there is no separate MCP process or handshake. The full bundle is 1.45 MB on disk
-(315 kB gzip) because the SDK and its gRPC client are included; it is loaded once and does not add
-to the model context.
+smaller — and there is no separate MCP process or handshake. The bundle is about 1.45 MB unpacked
+because the SDK and its gRPC client are included; the release tarball is about 330 KB. It is
+loaded once and does not add to the model context.
 
 ## Troubleshooting
 
@@ -212,7 +213,8 @@ than seven days are pruned.
 The source is plain ESM in `index.js` and `src/`. The runtime artifact is one file,
 `dist/index.mjs`, built with [tsdown](https://tsdown.dev). It includes the nine tool definitions,
 the SDK transport and the `es-toolkit` helpers; Node builtins stay external. There are no runtime
-npm dependencies, and `dist/` is committed so a directory install does not need a build.
+npm dependencies. `dist/` is not committed; GitHub Actions builds it and attaches the packed
+tarball to each release.
 
 ```sh
 pnpm install
@@ -220,8 +222,13 @@ pnpm build     # write dist/index.mjs
 pnpm check     # offline checks: tools, manifest, SDK mapping, attach logic, bundle
 ```
 
-The current bundle is 1,445,677 bytes (315,032 bytes gzip). Attach behavior and daemon ownership
-are covered by the offline checks; they use fake transport dependencies, so no daemon is needed.
+The bundle is about 1.45 MB unpacked; the release tarball is about 330 KB. Attach behavior and
+daemon ownership are covered by the offline checks; they use fake transport dependencies, so no
+daemon is needed.
+
+To publish a release, bump `version` in `package.json`, commit, and push a matching tag
+(`vX.Y.Z`). GitHub Actions installs dependencies, builds, runs the checks, packs the plugin and
+attaches `dsh-plugin-auv-X.Y.Z.tgz` and `dsh-plugin-auv.tgz` to the release.
 
 ## Status
 

@@ -6,10 +6,11 @@
 
 将 [AUV](https://github.com/moeru-ai/auv) 的操作系统自动化能力集成到 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）的原生模型工具。
 
-插件使用 AUV 官方 [`@auv-js/sdk`](https://www.npmjs.com/package/@auv-js/sdk)：优先连接你已经在运行的 AUV daemon；没有可连接的就自己启动一个私有 daemon。插件不调用 `auv` 命令行。
+使用[`@auv-js/sdk`](https://www.npmjs.com/package/@auv-js/sdk)实现
 
 > [!WARNING]
-> **务必在此之前安装AUV** 系统若为 macOS 则须授予 **DeepSeek Harness** 权限 。安装与配置参考[前置工作](#前置工作)。
+> **还请务必在此之前安装AUV** 系统若为 macOS 则须授予 **DeepSeek Harness** 权限 。安装与配置参考[前置工作](#前置工作)。
+ 
 
 ## 前置工作
 
@@ -45,28 +46,31 @@ AUV 相关链接：
 
 ## 安装
 
-插件已经构建好，运行时产物就是仓库里的单文件 `dist/index.mjs`，没有运行时 npm 依赖，不需要 clone 或 build。
+插件是构建好的。release 里的 tarball 只包含运行需要的文件（约 330 KB）：`dist/index.mjs`、manifest、插件 patch、locale 和图标。
 
-在 **设置 → 插件 → 添加插件** 的输入框里填这个仓库地址：
+在 **设置 → 插件 → 添加插件** 的输入框里填最新 release 的 tarball：
 
 ```
-https://github.com/liliumneko/dsh-plugin-auv
+https://github.com/liliumneko/dsh-plugin-auv/releases/latest/download/dsh-plugin-auv.tgz
 ```
 
 点安装，然后启用「AUV 桌面自动化」。安装后 9 个 `auv_*` 工具会在下一步模型调用时出现；建议先跑 `auv_doctor`。
 
-这个对话框也接受 npm 包名和本地目录，这里填 GitHub 仓库地址即可。从 GitHub 拉取慢的话，可以在对话框里换安装源。
+同一个输入框也接受 npm 包名和本地目录。仓库里不放构建产物，所以填 GitHub 仓库地址装不了；要么用 release tarball，要么 clone 下来自己构建（开发用）。
 
-在会话里也可以用命令，`target` 填同一个地址：
+在会话里也可以用命令，`target` 填同一个链接：
 
 ```
-plugin_manager action=install_bundle target=https://github.com/liliumneko/dsh-plugin-auv
+plugin_manager action=install_bundle target=https://github.com/liliumneko/dsh-plugin-auv/releases/latest/download/dsh-plugin-auv.tgz
 ```
 
-要改代码时才需要 clone：
+要改代码时：
 
 ```sh
 git clone https://github.com/liliumneko/dsh-plugin-auv.git
+cd dsh-plugin-auv
+pnpm install
+pnpm build
 plugin_manager action=install_bundle target=/absolute/path/to/dsh-plugin-auv
 ```
 
@@ -134,7 +138,7 @@ auv_scroll { "window_id": "<id>", "dy": 600 }
 
 AUV 自带 `auv mcp serve`，用 `@deepseek-ai/dsh-mcp-client` 零代码就能接。但这条路线每轮都会把 AUV 完整的 MCP schema 放进上下文：实测 AUV 0.0.43 是 181,539 B（compact 117,422 B，约 29k tokens），其中大部分是单个 `invoke` 工具里内嵌的命令列表。
 
-本插件 9 个工具的 schema 合计 **10,645 B（约 2.7k tokens）**，比 MCP 桥的 compact 版本小约 **11 倍**，而且没有额外的 MCP 进程和握手。完整 bundle 在磁盘上是 1.45 MB（315 kB gzip），因为带上了 SDK 和 gRPC 客户端；它只加载一次，不占模型上下文。
+本插件 9 个工具的 schema 合计 **10,645 B（约 2.7k tokens）**，比 MCP 桥的 compact 版本小约 **11 倍**，而且没有额外的 MCP 进程和握手。bundle 解压后约 1.45 MB（release tarball 约 330 KB），因为带上了 SDK 和 gRPC 客户端；它只加载一次，不占模型上下文。
 
 ## 排障
 
@@ -150,7 +154,7 @@ AUV 自带 `auv mcp serve`，用 `@deepseek-ai/dsh-mcp-client` 零代码就能�
 
 源码是 `index.js` + `src/` 的纯 ESM。运行时产物是单个文件 `dist/index.mjs`，用
 [tsdown](https://tsdown.dev) 打包：9 个工具、SDK 连接和 es-toolkit 辅助函数都在里面，Node 内建模块保持
-external。没有运行时 npm 依赖，`dist/` 已提交，目录安装不用构建。
+external。没有运行时 npm 依赖。`dist/` 不提交，由 GitHub Actions 构建并把打包好的 tarball 传到 release 里。
 
 ```sh
 pnpm install
@@ -158,8 +162,11 @@ pnpm build     # 生成 dist/index.mjs
 pnpm check     # 离线自检：工具、manifest、SDK 参数映射、daemon 连接逻辑、bundle
 ```
 
-当前 bundle 是 1,445,677 字节（315,032 字节 gzip）。daemon 的连接与归属逻辑由离线自检覆盖，用的是假的
+bundle 解压后约 1.45 MB，release tarball 约 330 KB。daemon 的连接与归属逻辑由离线自检覆盖，用的是假的
 transport 依赖，不需要真的起 daemon。
+
+发版：改 `package.json` 里的 `version`，提交后推送同名 tag（`vX.Y.Z`）。GitHub Actions 会安装依赖、构建、
+跑检查、打包，并把 `dsh-plugin-auv-X.Y.Z.tgz` 和 `dsh-plugin-auv.tgz` 传到 release。
 
 ## 状态
 

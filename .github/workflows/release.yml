@@ -1,0 +1,46 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm check
+
+      - name: Pack the plugin
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          if [ "${GITHUB_REF_NAME}" != "v${version}" ]; then
+            echo "tag ${GITHUB_REF_NAME} does not match package.json version ${version}" >&2
+            exit 1
+          fi
+          pnpm pack
+          mv "local-dsh-auv-${version}.tgz" "dsh-plugin-auv-${version}.tgz"
+          cp "dsh-plugin-auv-${version}.tgz" dsh-plugin-auv.tgz
+
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          tag="v${version}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "dsh-plugin-auv-${version}.tgz" dsh-plugin-auv.tgz --clobber
+          else
+            gh release create "$tag" "dsh-plugin-auv-${version}.tgz" dsh-plugin-auv.tgz --generate-notes
+          fi
