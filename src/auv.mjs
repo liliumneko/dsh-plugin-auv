@@ -7,6 +7,7 @@
  */
 
 import { accessSync, constants, statSync } from 'node:fs'
+import { clamp } from 'es-toolkit'
 import { spawn } from 'node:child_process'
 import os from 'node:os'
 import path from 'node:path'
@@ -72,7 +73,7 @@ export function envFlag(name) {
 export function clampTimeout(value) {
   const number = Number(value)
   if (!Number.isFinite(number) || number <= 0) return DEFAULT_TIMEOUT_MS
-  return Math.min(MAX_TIMEOUT_MS, Math.max(MIN_TIMEOUT_MS, Math.round(number)))
+  return clamp(Math.round(number), MIN_TIMEOUT_MS, MAX_TIMEOUT_MS)
 }
 
 /** Whether a path is an existing executable file. */

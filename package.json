@@ -24,13 +24,12 @@
     "macos"
   ],
   "exports": {
-    ".": "./index.js",
+    ".": "./dist/index.mjs",
     "./locale/*.json": "./locale/*.json",
     "./icon": "./icon.svg"
   },
   "files": [
-    "index.js",
-    "src",
+    "dist",
     "cordis.patch.yml",
     "locale",
     "icon.svg",
@@ -42,5 +41,16 @@
     "bundle": {
       "patch": "./cordis.patch.yml"
     }
+  },
+  "devDependencies": {
+    "es-toolkit": "^1.53.2",
+    "tsdown": "^0.23.7"
+  },
+  "scripts": {
+    "build": "tsdown",
+    "build:watch": "tsdown --watch",
+    "check": "node tools/check-tools.mjs",
+    "catalog": "node tools/generate-catalog.mjs",
+    "catalog:sync": "node tools/sync-catalog-data.mjs"
   }
 }

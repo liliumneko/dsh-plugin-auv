@@ -7,10 +7,13 @@
  * positive timeout, and `isConcurrencySafe: () => false` because OS input is
  * mutually exclusive.
  *
- * The AUV command catalog (src/catalog.json + src/catalog.mjs) is loaded lazily
- * with a dynamic import so the tools still register when the catalog is missing;
- * catalog-dependent calls then fail with a clear, actionable message.
+ * The AUV command catalog (src/catalog.json mirrored into src/catalog-data.mjs,
+ * exposed by src/catalog.mjs) is statically imported so the tsdown bundle inlines
+ * it into the single dist/index.mjs. A missing generated catalog therefore fails
+ * package validation/build time, not at first tool call.
  */
+
+import { isPlainObject } from 'es-toolkit'
 
 import {
   artifactPathOf,
@@ -18,6 +21,7 @@ import {
   runAuv,
   runAuvDoctor,
 } from './auv.mjs'
+import * as catalogModule from './catalog.mjs'
 
 const INLINE_JSON_LIMIT = 20_000
 const SCREENSHOT_JSON_LIMIT = 8_000
@@ -45,19 +49,9 @@ export const TOOL_NAMES = [
 // Catalog access (lazy, defensive)
 // ---------------------------------------------------------------------------
 
-let catalogModulePromise
-
-/** Load the catalog module lazily; tools register even when it is absent. */
+/** The statically imported catalog module (bundled into dist/index.mjs). */
 async function getCatalogModule() {
-  if (catalogModulePromise === undefined) {
-    const url = new URL('./catalog.mjs', import.meta.url)
-    catalogModulePromise = import(url.href).catch((error) => {
-      throw new Error(
-        `The AUV command catalog is unavailable (${url.pathname}). Reinstall @local/dsh-auv or regenerate it with \`node tools/generate-catalog.mjs\`. ${messageOf(error)}`,
-      )
-    })
-  }
-  return await catalogModulePromise
+  return catalogModule
 }
 
 /** Resolve one catalog command or throw an actionable unknown-command error. */
@@ -134,7 +128,7 @@ function textBlock(text) {
 }
 
 function objectArgs(value) {
-  return value !== null && typeof value === 'object' && !Array.isArray(value) ? value : {}
+  return isPlainObject(value) ? value : {}
 }
 
 function optionalString(args, key) {
@@ -175,7 +169,7 @@ function optionalEnum(args, key, allowed) {
 function optionalObject(args, key) {
   const value = args[key]
   if (value === undefined || value === null) return undefined
-  if (typeof value !== 'object' || Array.isArray(value)) throw new Error(`Parameter "${key}" must be an object.`)
+  if (!isPlainObject(value)) throw new Error(`Parameter "${key}" must be an object.`)
   return value
 }
 

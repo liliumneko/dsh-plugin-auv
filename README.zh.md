@@ -51,7 +51,7 @@ AUV 相关链接：
 
 ## 安装
 
-本仓库本身就是插件包目录（纯本地包，无构建步骤、无 npm 依赖）。
+本仓库本身就是插件包目录。运行时产物是已构建好的单文件 `dist/index.mjs`（用 [tsdown](https://tsdown.dev) 打包，无运行时 npm 依赖），已提交到仓库，clone 后安装无需构建。
 
 ```sh
 git clone https://github.com/liliumneko/dsh-auv.git
@@ -133,12 +133,23 @@ AUV 自带 `auv mcp serve`，用 `@deepseek-ai/dsh-mcp-client` 零代码就能�
 
 ## 开发
 
-纯 ESM、无依赖、无构建：
+源码是 `index.js` + `src/` 的纯 ESM；运行时产物是**单个自包含文件 `dist/index.mjs`**，由
+[tsdown](https://tsdown.dev)（Rolldown）打包：11 个工具定义、AUV 命令目录和 es-toolkit 辅助函数全部内联，
+Node 内建模块保持 external。无运行时 npm 依赖，`dist/` 已提交，目录安装无需构建。
 
 ```sh
-node tools/check-tools.mjs          # 离线自检（含“AUV 未安装时提示安装”检查）
+pnpm install                        # 仅维护者：安装 tsdown / es-toolkit
+pnpm build                          # tsdown -> dist/index.mjs（记得提交产物）
+pnpm check                          # 离线自检：源码、manifest、目录镜像、bundle
 node notes/catalog-selfcheck.mjs    # 命令目录 argv 自检（43 条）
-node tools/generate-catalog.mjs     # AUV 升级后重新生成 src/catalog.json
+```
+
+AUV 升级后刷新目录：
+
+```sh
+node tools/generate-catalog.mjs     # 重新生成 src/catalog.json（MCP + CLI 交叉校验）
+node tools/sync-catalog-data.mjs    # 镜像为 src/catalog-data.mjs（运行时内联的数据模块）
+pnpm build                          # 重新打包单文件
 ```
 
 ## 状态

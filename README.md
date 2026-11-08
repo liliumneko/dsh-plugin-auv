@@ -73,8 +73,9 @@ Useful AUV links:
 
 ## Install
 
-This repository *is* the plugin bundle package (a plain local package directory with no build step
-and no npm dependencies).
+This repository *is* the plugin bundle package. The runtime artifact is the prebuilt single file
+`dist/index.mjs` (built with [tsdown](https://tsdown.dev); no runtime npm dependencies), committed
+to the repository, so cloning and installing needs no build step.
 
 1. Install AUV, grant permissions, and restart Harness — see [Before you start](#before-you-start).
 2. Clone this repository anywhere:
@@ -279,35 +280,54 @@ The plugin returns an absolute path inside `AUV_DSH_STORE_ROOT`. Pass that exact
 
 ## Development
 
-No build step, no npm dependencies — plain ESM JavaScript (Node built-ins only).
+Source lives in `index.js` + `src/` as plain ESM. The runtime artifact is one self-contained file,
+**`dist/index.mjs`**, built with [tsdown](https://tsdown.dev) (Rolldown): the tool definitions, the
+generated AUV catalog, and the [es-toolkit](https://es-toolkit.dev) helpers are inlined, while Node
+builtins stay external. There are no runtime npm dependencies, and `dist/` is committed so a
+directory install does not need a build step.
 
 ```sh
-node tools/check-tools.mjs          # offline schema/definition/manifest + missing-AUV guidance checks
+pnpm install                        # dev-only tooling (tsdown, es-toolkit)
+pnpm build                          # tsdown -> dist/index.mjs (commit the result)
+pnpm check                          # offline checks: source, manifest, catalog mirror, bundle
 node notes/catalog-selfcheck.mjs    # catalog argv self-check (43 commands)
-node tools/generate-catalog.mjs     # regenerate src/catalog.json for a new AUV version
+```
+
+Catalog maintenance after an AUV upgrade:
+
+```sh
+node tools/generate-catalog.mjs     # refresh src/catalog.json (MCP + CLI cross-check)
+node tools/sync-catalog-data.mjs    # mirror src/catalog.json -> src/catalog-data.mjs (runtime data)
+pnpm build                          # rebuild the single-file bundle
 ```
 
 `src/catalog.json` is generated from `auv mcp serve` and cross-checked against
 `auv invoke <id> --help`; `src/catalog.mjs` validates input keys, builds argv, and produces the
-`auv_help` text. Regenerate the catalog after upgrading AUV.
+`auv_help` text. `src/catalog-data.mjs` is the generated ESM mirror that the bundle inlines.
 
 ## Repository layout
 
 ```
-package.json          bundle manifest (dsh.bundle.patch, exports ./locale/*.json and ./icon)
+package.json          bundle manifest (dsh.bundle.patch, exports "." -> dist/index.mjs)
 cordis.patch.yml      Loader patch inserting the dsh-auv row
-index.js              plugin entry: inject ['tools'] + apply() registering the eleven tools
+index.js              plugin entry source: inject ['tools'] + apply() registering the eleven tools
 src/auv.mjs           binary discovery + install guidance, spawn runner, timeout/abort, receipt errors
 src/catalog.json      generated AUV command catalog (43 commands, AUV 0.0.43)
+src/catalog-data.mjs  generated ESM mirror of catalog.json, inlined by the bundler
 src/catalog.mjs       argv builder, target formatting, catalog help text
 src/tools.mjs         the eleven ToolDefinitions
+dist/index.mjs        prebuilt single-file runtime bundle (tsdown; commit this)
+tsdown.config.mjs     bundler configuration
 locale/en.json        plugin title/description (English)
 locale/zh.json        plugin title/description (Chinese)
 icon.svg              official AUV logo on a white rounded background
-tools/                maintainer scripts (offline checks, catalog generator)
+tools/                maintainer scripts (offline checks, catalog generator, data mirror)
 notes/                design/verification evidence from the integration work
 DESIGN.md             the build specification used for this integration
 ```
+
+The DSH loader imports `dist/index.mjs` through `package.json` `exports["."]`; the static DSH
+resources (`cordis.patch.yml`, `locale/`, `icon.svg`) are never bundled.
 
 ## Status
 

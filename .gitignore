@@ -152,3 +152,11 @@ vite.config.ts.timestamp-*
 .auv/
 .auvtest/
 .DS_Store
+
+# tsdown output is committed for direct directory install
+!dist/
+!dist/index.mjs
+# local pnpm/bundler caches
+.pnpm-store/
+.cache/
+.local/

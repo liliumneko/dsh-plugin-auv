@@ -1,9 +1,9 @@
 /**
  * AUV command catalog helpers for the @local/dsh-auv Host plugin.
  *
- * Pure, dependency-free ESM. The only I/O is a synchronous read of the
- * generated `catalog.json` next to this file at module load (no auv spawn,
- * no network).
+ * Pure ESM. The catalog is imported from the generated `catalog-data.mjs`
+ * (mirrored from `catalog.json`) so a bundled build has no runtime file reads;
+ * there is no auv spawn and no network I/O.
  *
  * Exports:
  *   CATALOG                       parsed catalog object
@@ -27,10 +27,7 @@
  *   - non-fatal issues are returned in `warnings` for the caller to surface.
  */
 
-import { readFileSync } from 'node:fs'
-
-const CATALOG_URL = new URL('./catalog.json', import.meta.url)
-const CATALOG = JSON.parse(readFileSync(CATALOG_URL, 'utf8'))
+import CATALOG from './catalog-data.mjs'
 
 const COMMANDS_BY_ID = new Map(CATALOG.commands.map((command) => [command.id, command]))
 const TARGET_KEYS = [

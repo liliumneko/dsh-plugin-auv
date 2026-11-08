@@ -17,6 +17,7 @@
  */
 
 import { existsSync, readFileSync, statSync } from 'node:fs'
+import { isDeepStrictEqual } from 'node:util'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
@@ -307,11 +308,12 @@ async function checkManifestAndResources() {
   assertEqual(manifest.type, 'module', 'package type')
   assertEqual(manifest.private, true, 'package private')
   assertEqual(manifest.dsh?.bundle?.patch, './cordis.patch.yml', 'dsh.bundle.patch')
-  assertEqual(manifest.exports?.['.'], './index.js', 'package exports "."')
+  assertEqual(manifest.exports?.['.'], './dist/index.mjs', 'package exports "." must point at the bundled entry')
+  assert(Array.isArray(manifest.files) && manifest.files.includes('dist'), 'package.json files must ship dist/')
   assert(typeof manifest.exports?.['./locale/*.json'] === 'string', 'package must export ./locale/*.json')
   assert(typeof manifest.exports?.['./icon'] === 'string', 'package must export ./icon')
 
-  for (const file of ['index.js', 'cordis.patch.yml', 'icon.svg', 'locale/en.json', 'locale/zh.json', 'src/auv.mjs', 'src/tools.mjs']) {
+  for (const file of ['index.js', 'cordis.patch.yml', 'icon.svg', 'locale/en.json', 'locale/zh.json', 'src/auv.mjs', 'src/tools.mjs', 'src/catalog-data.mjs', 'dist/index.mjs']) {
     assert(existsSync(path.join(PLUGIN, file)), `missing required file ${file}`)
   }
 
@@ -561,6 +563,44 @@ async function checkMissingAuvGuidance() {
   }
 }
 
+async function checkCatalogData() {
+  const jsonPath = path.join(SRC, 'catalog.json')
+  const dataPath = path.join(SRC, 'catalog-data.mjs')
+  assert(existsSync(jsonPath), 'src/catalog.json must exist (run node tools/catalog.mjs)')
+  assert(existsSync(dataPath), 'src/catalog-data.mjs must exist (run node tools/sync-catalog-data.mjs)')
+
+  const json = JSON.parse(readFileSync(jsonPath, 'utf8'))
+  const data = (await import(pathToFileURL(dataPath).href)).default
+  assert(isDeepStrictEqual(json, data), 'src/catalog-data.mjs must mirror src/catalog.json exactly; run node tools/sync-catalog-data.mjs')
+
+  const catalogSource = readFileSync(path.join(SRC, 'catalog.mjs'), 'utf8')
+  assert(catalogSource.includes("from './catalog-data.mjs'"), 'catalog.mjs must import the generated data module')
+  assert(!/readFileSync\(/.test(catalogSource), 'catalog.mjs must not read catalog.json at runtime (the bundle has no side files)')
+}
+
+async function checkBundle() {
+  const distPath = path.join(PLUGIN, 'dist', 'index.mjs')
+  assert(existsSync(distPath), 'dist/index.mjs is missing; run `pnpm build` (tsdown) and commit dist/')
+
+  const source = readFileSync(distPath, 'utf8')
+  const relativeImports = [...source.matchAll(/^import\s+(?:[^'"]+from\s+)?["']([^"']+)["']/gm)].map((match) => match[1])
+  const nonNodeImports = relativeImports.filter((specifier) => !specifier.startsWith('node:'))
+  assert(nonNodeImports.length === 0, `dist/index.mjs must only import node: builtins, found: ${nonNodeImports.join(', ')}`)
+  assert(!source.includes('import("./') && !source.includes("import('./"), 'dist/index.mjs must not dynamically import local modules')
+
+  const bundle = await import(`${pathToFileURL(distPath).href}?check=${Date.now()}`)
+  assertEqual(bundle.inject, ['tools'], "bundle must export inject = ['tools']")
+  assert(typeof bundle.apply === 'function', 'bundle must export apply(ctx)')
+  const registered = []
+  bundle.apply({ tools: { register(definition) { registered.push(definition) } } })
+  assertEqual(registered.length, 11, 'bundled apply() should register 11 tools')
+  assert(new Set(registered.map((definition) => definition.name)).size === 11, 'bundled apply() registered duplicate tool names')
+
+  const help = registered.find((definition) => definition.name === 'auv_help')
+  const value = await help.execute({}, { signal: new AbortController().signal })
+  assert(value?.mode === 'summary' && value?.count === 43, 'bundled auv_help must read the inlined catalog (43 commands)')
+}
+
 async function main() {
   console.log('AUV plugin offline self-check')
   console.log(`plugin: ${PLUGIN}`)
@@ -569,6 +609,8 @@ async function main() {
   await check('tool definitions', checkToolDefinitions)
   await check('plugin entry point', checkEntryPoint)
   await check('manifest, patch, locales, icon', checkManifestAndResources)
+  await check('catalog data mirror', checkCatalogData)
+  await check('bundled dist/index.mjs', checkBundle)
   await check('offline execute guards', checkOfflineExecuteGuards)
   await check('catalog contract', checkCatalog)
 
