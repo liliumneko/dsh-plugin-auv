@@ -19,9 +19,13 @@ import {
   artifactPathOf,
   clampTimeout,
   runAuv,
-  runAuvDoctor,
 } from './auv.mjs'
 import * as catalogModule from './catalog.mjs'
+import {
+  activeSdkTransport,
+  runAuvDoctorWithSdkFallback,
+  runAuvWithSdkFallback,
+} from './transport/sdk.mjs'
 
 const INLINE_JSON_LIMIT = 20_000
 const SCREENSHOT_JSON_LIMIT = 8_000
@@ -419,7 +423,7 @@ export function createTools() {
         },
       },
       async execute(_rawArgs, exec) {
-        return await runAuvDoctor({ signal: exec?.signal, timeoutMs: TOOL_TIMEOUT_MS })
+        return await runAuvDoctorWithSdkFallback({ signal: exec?.signal, timeoutMs: TOOL_TIMEOUT_MS })
       },
       timeoutMs: TOOL_TIMEOUT_MS,
       isConcurrencySafe: () => false,
@@ -454,6 +458,8 @@ export function createTools() {
         },
       },
       async execute(rawArgs, exec) {
+        const sdk = await activeSdkTransport()
+        if (sdk !== null) return await sdk.screenshot(rawArgs, exec, TOOL_TIMEOUT_MS)
         const args = objectArgs(rawArgs)
         const signal = exec?.signal
         const windowId = optionalString(args, 'window_id')
@@ -533,6 +539,8 @@ export function createTools() {
         },
       },
       async execute(rawArgs, exec) {
+        const sdk = await activeSdkTransport()
+        if (sdk !== null) return await sdk.ocr(rawArgs, exec, SLOW_TOOL_TIMEOUT_MS)
         const args = objectArgs(rawArgs)
         const signal = exec?.signal
         const text = requiredString(args, 'text')
@@ -613,6 +621,8 @@ export function createTools() {
         },
       },
       async execute(rawArgs, exec) {
+        const sdk = await activeSdkTransport()
+        if (sdk !== null) return await sdk.click(rawArgs, exec, SLOW_TOOL_TIMEOUT_MS)
         const args = objectArgs(rawArgs)
         const signal = exec?.signal
         const text = optionalString(args, 'text')
@@ -706,6 +716,8 @@ export function createTools() {
         },
       },
       async execute(rawArgs, exec) {
+        const sdk = await activeSdkTransport()
+        if (sdk !== null) return await sdk.type(rawArgs, exec, TOOL_TIMEOUT_MS)
         const args = objectArgs(rawArgs)
         const signal = exec?.signal
         const text = requiredString(args, 'text')
@@ -756,6 +768,8 @@ export function createTools() {
         },
       },
       async execute(rawArgs, exec) {
+        const sdk = await activeSdkTransport()
+        if (sdk !== null) return await sdk.keys(rawArgs, exec, TOOL_TIMEOUT_MS)
         const args = objectArgs(rawArgs)
         const signal = exec?.signal
         const rawKeys = args.keys
@@ -814,6 +828,8 @@ export function createTools() {
         },
       },
       async execute(rawArgs, exec) {
+        const sdk = await activeSdkTransport()
+        if (sdk !== null) return await sdk.scroll(rawArgs, exec, TOOL_TIMEOUT_MS)
         const args = objectArgs(rawArgs)
         const signal = exec?.signal
         const dy = optionalNumber(args, 'dy')
@@ -905,6 +921,8 @@ export function createTools() {
         },
       },
       async execute(rawArgs, exec) {
+        const sdk = await activeSdkTransport()
+        if (sdk !== null) return await sdk.windows(rawArgs, exec, TOOL_TIMEOUT_MS)
         const args = objectArgs(rawArgs)
         const signal = exec?.signal
         const includeMinimized = args.include_minimized === true
@@ -937,6 +955,8 @@ export function createTools() {
         },
       },
       async execute(rawArgs, exec) {
+        const sdk = await activeSdkTransport()
+        if (sdk !== null) return await sdk.activate(rawArgs, exec, TOOL_TIMEOUT_MS)
         const args = objectArgs(rawArgs)
         const signal = exec?.signal
         const applicationId = requiredString(args, 'application_id')
@@ -1019,7 +1039,7 @@ export function createTools() {
         }
 
         const built = await buildInvoke(commandId, inputs, { target })
-        const receipt = await runAuv({
+        const receipt = await runAuvWithSdkFallback({
           commandId,
           argv: built.args,
           target: built.target,

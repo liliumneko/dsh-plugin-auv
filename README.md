@@ -7,7 +7,9 @@
 A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) Host plugin bundle that
 exposes [AUV](https://github.com/moeru-ai/auv) OS automation as eleven native model tools:
 screenshots, Vision OCR, clicks, typing, key presses, scrolling, window listing, app activation, a
-raw command escape hatch, a readiness check, and catalog help.
+raw command escape hatch, a readiness check, and catalog help. The eight typed tools run over
+AUV's official [`@auv-js/sdk`](https://www.npmjs.com/package/@auv-js/sdk) client (an app-owned AUV
+daemon started by the plugin), with the historical `auv invoke` CLI kept as a fallback.
 
 > [!WARNING]
 > **Installing this plugin alone does nothing.** It is only the DeepSeek Harness ↔ AUV bridge.
@@ -160,14 +162,51 @@ Windows; on macOS it fails fast with an actionable error. Pass `window_id` inste
 
 | Variable | Default | Effect |
 | --- | --- | --- |
+| `AUV_DSH_TRANSPORT` | `auto` | Transport selection: `auto` (SDK first, permanent CLI fallback when the owned daemon cannot start), `sdk` (require the SDK; startup errors surface), `cli` (never start the SDK daemon). |
+| `AUV_DSH_SDK_STORE_ROOT` | `$DSH_HOME/auv/sdk` (usually `~/.dsh/auv/sdk`) | Store root and socket state for the plugin-owned SDK daemon. |
+| `AUV_DSH_CAPTURE_DIR` | `$DSH_HOME/auv/sdk-captures` (usually `~/.dsh/auv/sdk-captures`) | Where SDK-mode screenshots are written as `.webp` files for `read_image`. |
 | `AUV_BIN` | resolved from `PATH`, then `/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin`, `~/.cargo/bin` | Absolute path to the `auv` executable. Invalid values fail fast with install instructions. |
-| `AUV_DSH_STORE_ROOT` | `$DSH_HOME/auv/runs` (usually `~/.dsh/auv/runs`) | `--store-root` for every invocation, so run receipts and `.webp` artifacts have stable paths. |
-| `AUV_DSH_NO_DAEMON` | unset (use the local AUV daemon) | `1`/`true`/`yes` adds the root option `--no-daemon` to every `auv invoke`. |
+| `AUV_DSH_STORE_ROOT` | `$DSH_HOME/auv/runs` (usually `~/.dsh/auv/runs`) | CLI-path `--store-root`, so CLI run receipts and `.webp` artifacts have stable paths. |
+| `AUV_DSH_NO_DAEMON` | unset (use the local AUV daemon) | CLI-path root option `--no-daemon` for every `auv invoke` (the SDK transport ignores it). |
 | `AUV_DSH_OVERLAY` | unset (overlays off) | `1`/`true`/`yes` leaves AUV's live visual overlays enabled; by default the plugin passes `--no-overlay`. |
 
 The `auv` child process inherits the Harness environment and gets
 `/opt/homebrew/bin:/usr/local/bin` appended to `PATH`, so a GUI-launched Harness can find a
 Homebrew-installed AUV.
+
+## Transport and daemon lifecycle
+
+The plugin has two interchangeable transports:
+
+- **SDK (default, `AUV_DSH_TRANSPORT=auto`)** — on the first typed tool call it lazily starts an
+  **app-owned `auv serve` daemon** through `@auv-js/sdk` (`startAuv()`), then talks to it over a
+  typed gRPC client. The daemon binds a private unix socket under `TMPDIR`, uses launcher-token
+  authentication, runs with `--no-register` (it never replaces or collides with your own
+  `auv serve`), and uses `--exit-on-stdin-close` so it dies with the Harness process. Plugin
+  unload/reload stops it through `ctx.effect`; a `globalThis` singleton prevents reload leaks.
+  The first call includes daemon startup and lazy Runner creation (roughly 1–5 s); later calls are
+  fast.
+- **CLI (`AUV_DSH_TRANSPORT=cli`, or automatic fallback)** — the historical one-`auv invoke`
+  child process per call, with the same behavior and artifact/keychain semantics as before.
+
+`AUV_DSH_TRANSPORT=auto` (the default) falls back to the CLI permanently for the process after
+**one** warning if the SDK daemon cannot start. `sdk` surfaces the startup error instead of
+falling back.
+
+`auv_doctor`, `auv_invoke` and `auv_help` stay on the CLI/catalog paths (the SDK has no doctor
+report and speaks typed RPCs, not CLI argv). In SDK mode `auv_doctor`/`auv_invoke` reuse the
+already-running owned daemon via `AUV_ENDPOINT` + `--credential-stdin`; `auv_doctor` never forces
+the daemon to start.
+
+Semantic differences between modes:
+
+| Aspect | SDK transport | CLI transport |
+| --- | --- | --- |
+| Screenshots | `CaptureResolution.LOGICAL` (1 px per point) bounded to 2048², written by the plugin to `AUV_DSH_CAPTURE_DIR` as `.webp` | AUV's native capture (2× on Retina) persisted by AUV under `AUV_DSH_STORE_ROOT` |
+| `run_id` in tool results | `null` — no CLI-style Run/trace record per call (no per-call Run is created in v1) | AUV Run id with persisted run/artifact records |
+| `window_id` targeting | Exact `WindowClient` binding for capture/findText/click/type/keys/scroll | CLI `window.capture`/`findText`/`clickText` need `app:` + `--title`, so the plugin resolves the window first |
+| `auv_ocr wait: true` | Client-side `findText` polling (fresh capture per poll) | `display.waitForText`/`window.waitForText` |
+| Mutating input | Typed calls; no `--dry-run` equivalent | `auv invoke` argv with `--dry-run` support |
 
 ## Examples
 
@@ -229,8 +268,10 @@ This bundle registers eleven focused tools whose schemas total **13,392 bytes (�
 about **8.8× smaller** than the MCP bridge's compact schema set — with no extra process and no MCP
 handshake. The command catalog lives on disk (43 commands, generated from the AUV MCP server and
 cross-checked against `auv invoke <id> --help`) and is used to build argv locally, while
-`auv_help` exposes it to the model on demand. Screenshot artifacts are `.webp` files read through
-DSH's own `read_image` tool.
+`auv_help` exposes it to the model on demand. The runtime is one tsdown-built `dist/index.mjs`
+(1.58 MB raw / 338 KB gzip) that inlines the typed SDK and its gRPC client, so the plugin has no
+runtime npm dependencies. Screenshot artifacts are `.webp` files read through DSH's own
+`read_image` tool.
 
 ## Troubleshooting
 
@@ -245,6 +286,15 @@ the repository link; `auv_doctor` returns the same instructions.
 Check the three prerequisites, in order: AUV installed, **DeepSeek Harness** holding Accessibility
 and Screen Recording, Harness restarted after the grant. `auv_doctor` reports exactly what is
 missing.
+
+### SDK daemon fails to start
+
+With `AUV_DSH_TRANSPORT=auto` the plugin logs one warning and permanently uses the CLI transport
+for that process; tools keep working. Set `AUV_DSH_TRANSPORT=cli` to skip the SDK startup attempt
+entirely, or `AUV_DSH_TRANSPORT=sdk` to surface the startup error (useful for debugging). Make
+sure `AUV_DSH_SDK_STORE_ROOT` is writable and no stale `auv serve` from this plugin is holding
+state. The owned daemon is private (`--no-register`), so it does not conflict with the user's own
+AUV daemon.
 
 ### Daemon / socket errors
 
@@ -315,14 +365,15 @@ src/auv.mjs           binary discovery + install guidance, spawn runner, timeout
 src/catalog.json      generated AUV command catalog (43 commands, AUV 0.0.43)
 src/catalog-data.mjs  generated ESM mirror of catalog.json, inlined by the bundler
 src/catalog.mjs       argv builder, target formatting, catalog help text
-src/tools.mjs         the eleven ToolDefinitions
+src/tools.mjs         the eleven ToolDefinitions (SDK first, unchanged CLI bodies as fallback)
+src/transport/        @auv-js/sdk transport: daemon lifecycle, typed ops, config, formatters
 dist/index.mjs        prebuilt single-file runtime bundle (tsdown; commit this)
 tsdown.config.mjs     bundler configuration
 locale/en.json        plugin title/description (English)
 locale/zh.json        plugin title/description (Chinese)
 icon.svg              official AUV logo on a white rounded background
 tools/                maintainer scripts (offline checks, catalog generator, data mirror)
-notes/                design/verification evidence from the integration work
+notes/                design/verification evidence (CLI contract, SDK API map, SDK transport)
 DESIGN.md             the build specification used for this integration
 ```
 
@@ -334,7 +385,14 @@ resources (`cordis.patch.yml`, `locale/`, `icon.svg`) are never bundled.
 Verified end-to-end on macOS 27.2 with AUV 0.0.43 and DeepSeek Harness: all eleven tools through
 the live Host process, including real input delivery (`auv_click` → `auv_type` → `auv_keys`
 typing and sending a message in the Harness composer), screenshot → `read_image`, OCR, window and
-display targeting, and negative/argument cases. Evidence: [`notes/verification-report.md`](notes/verification-report.md).
+display targeting, and negative/argument cases. The SDK transport was verified live in the DSH
+Host on the same host: the plugin-owned daemon starts with `--no-register`, typed
+`window.list`/`capture`/`recognizeText` work, screenshots land in `~/.dsh/auv/sdk-captures` and
+display through `read_image`, CLI routing at the owned daemon works for `auv_invoke`, and the
+daemon process was observed as `auv serve … --local-socket … --no-register`. Evidence:
+[`notes/verification-report.md`](notes/verification-report.md),
+[`notes/sdk-transport.md`](notes/sdk-transport.md),
+[`notes/sdk-api-map.md`](notes/sdk-api-map.md).
 
 ## Attribution
 

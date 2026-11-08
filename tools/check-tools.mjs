@@ -296,10 +296,215 @@ async function checkEntryPoint() {
   assertEqual(entry.inject, ['tools'], 'index.js must export inject = [\'tools\']')
   assert(typeof entry.apply === 'function', 'index.js must export apply(ctx)')
   const registered = []
-  const ctx = { tools: { register(definition) { registered.push(definition) } } }
+  const disposers = []
+  const ctx = {
+    tools: {
+      register(definition) {
+        registered.push(definition)
+      },
+    },
+    effect(callback) {
+      disposers.push(callback())
+    },
+  }
   entry.apply(ctx)
   assert(registered.length === 11, `apply() should register 11 tools, registered ${registered.length}`)
   assert(new Set(registered.map((definition) => definition.name)).size === 11, 'apply() registered duplicate tool names')
+  assert(disposers.length === 1, `apply() must register one dispose effect, registered ${disposers.length}`)
+  assert(typeof disposers[0] === 'function', 'the dispose effect must return a disposer function')
+  // The disposer must be safe to call before any SDK daemon exists (cli/default cold state).
+  await disposers[0]()
+}
+
+// ---------------------------------------------------------------------------
+// SDK transport checks (offline; no daemon is started)
+// ---------------------------------------------------------------------------
+
+async function checkTransportConfig() {
+  const config = await import(pathToFileURL(path.join(SRC, 'transport', 'config.mjs')).href)
+
+  assertEqual(config.TRANSPORT_MODES, ['auto', 'sdk', 'cli'], 'TRANSPORT_MODES')
+  assertEqual(config.DEFAULT_TRANSPORT_MODE, 'auto', 'DEFAULT_TRANSPORT_MODE')
+
+  assertEqual(config.parseTransportMode(undefined).mode, 'auto', 'unset AUV_DSH_TRANSPORT defaults to auto')
+  assertEqual(config.parseTransportMode('').mode, 'auto', 'empty AUV_DSH_TRANSPORT defaults to auto')
+  assertEqual(config.parseTransportMode('auto').mode, 'auto', 'explicit auto')
+  assertEqual(config.parseTransportMode('sdk').mode, 'sdk', 'explicit sdk')
+  assertEqual(config.parseTransportMode('cli').mode, 'cli', 'explicit cli')
+  assertEqual(config.parseTransportMode('  SDK  ').mode, 'sdk', 'AUV_DSH_TRANSPORT is trimmed and case-insensitive')
+
+  const invalid = config.parseTransportMode('smtp')
+  assertEqual(invalid.mode, 'auto', 'an unknown transport falls back to auto')
+  assertEqual(invalid.invalid, 'smtp', 'the invalid value is reported')
+  assert(typeof invalid.warning === 'string' && /smtp/.test(invalid.warning), 'an unknown transport produces a warning')
+
+  assertEqual(config.resolveTransportConfig({}).mode, 'auto', 'resolveTransportConfig() defaults to auto')
+  assertEqual(config.resolveTransportConfig({ AUV_DSH_TRANSPORT: 'cli' }).cliForced, true, 'cli forces the CLI path')
+  assertEqual(config.resolveTransportConfig({ AUV_DSH_TRANSPORT: 'cli' }).sdkPreferred, false, 'cli never prefers the SDK')
+  assertEqual(config.resolveTransportConfig({ AUV_DSH_TRANSPORT: 'sdk' }).sdkPreferred, true, 'sdk prefers the SDK')
+  assertEqual(config.resolveTransportConfig({ AUV_DSH_TRANSPORT: 'auto' }).sdkPreferred, true, 'auto prefers the SDK')
+  assertEqual(config.sdkTransportEnabled({ AUV_DSH_TRANSPORT: 'cli' }), false, 'sdkTransportEnabled(cli) is false')
+  assertEqual(config.sdkTransportEnabled({ AUV_DSH_TRANSPORT: 'sdk' }), true, 'sdkTransportEnabled(sdk) is true')
+}
+
+async function checkSdkArgumentMapping() {
+  const format = await import(pathToFileURL(path.join(SRC, 'transport', 'sdk-format.mjs')).href)
+
+  // Windows options invert the CLI's exclude flags.
+  assertEqual(format.parseWindowsArgs({}), { includeMinimized: false, includeOtherDesktops: false }, 'auv_windows defaults')
+  assertEqual(
+    format.parseWindowsArgs({ include_minimized: true, include_other_desktops: true }),
+    { includeMinimized: true, includeOtherDesktops: true },
+    'auv_windows include flags',
+  )
+
+  // Screenshot target exclusivity.
+  assertEqual(
+    format.parseScreenshotArgs({ region: { x: 0, y: 0, width: 10, height: 20 } }).region,
+    { x: 0, y: 0, width: 10, height: 20 },
+    'auv_screenshot region parsing',
+  )
+  await assertRejects(() => format.parseScreenshotArgs({ window_id: '1', display_id: '1' }), /only one of/, 'auv_screenshot rejects competing targets')
+  await assertRejects(() => format.parseScreenshotArgs({ region: { x: 0, y: 0, width: 0, height: 10 } }), /greater than zero/, 'auv_screenshot rejects an empty region')
+
+  // OCR parity.
+  assertEqual(format.parseOcrArgs({ text: 'OK', wait: true, timeout_ms: 5000 }).timeoutMs, 5000, 'auv_ocr waits with a timeout')
+  await assertRejects(() => format.parseOcrArgs({ text: 'OK', timeout_ms: 5000 }), /only valid with wait/, 'auv_ocr rejects timeout_ms without wait')
+  await assertRejects(() => format.parseOcrArgs({ text: 'OK', wait: true, timeout_ms: 50 }), /between 100 and 120000/, 'auv_ocr timeout bounds')
+  await assertRejects(() => format.parseOcrArgs({ text: 'OK', window_id: '1', application_id: 'a' }), /only one of/, 'auv_ocr target exclusivity')
+
+  // Click forms.
+  assertEqual(format.parseClickArgs({ text: 'OK' }).kind, 'text', 'auv_click text form')
+  assertEqual(format.parseClickArgs({ x: 1, y: 2 }).kind, 'point', 'auv_click point form')
+  const fenced = format.parseClickArgs({ text: 'OK', within: { left: 0, top: 0, right: 10, bottom: 20 } })
+  assertEqual(fenced.within, { left: 0, top: 0, right: 10, bottom: 20 }, 'auv_click within fence')
+  await assertRejects(() => format.parseClickArgs({}), /requires either "text"/, 'auv_click rejects an empty click')
+  await assertRejects(() => format.parseClickArgs({ text: 'OK', x: 1, y: 2 }), /not both forms/, 'auv_click rejects text plus coordinates')
+  await assertRejects(() => format.parseClickArgs({ text: 'OK', button: 'right' }), /button applies only to x\/y/, 'auv_click rejects a non-left button on text clicks')
+  await assertRejects(() => format.parseClickArgs({ text: 'OK', display_id: '1' }), /display_id cannot be used with OCR/, 'auv_click rejects display_id with text')
+  assertEqual(format.parseClickArgs({ x: 1, y: 2, button: 'right' }).button, 'right', 'auv_click button mapping')
+
+  // Type / keys / scroll / activate parity.
+  assertEqual(format.parseTypeArgs({ text: 'hi', mode: 'paste', policy: 'background-only' }).mode, 'paste', 'auv_type paste mode')
+  await assertRejects(() => format.parseTypeArgs({}), /Missing required parameter "text"/, 'auv_type requires text')
+  const keys = format.parseKeysArgs({ keys: ['cmd', 'l'], repeat: 2, interval_ms: 100 })
+  assertEqual(keys.keys, ['cmd', 'l'], 'auv_keys keys')
+  await assertRejects(() => format.parseKeysArgs({ keys: [] }), /non-empty array/, 'auv_keys requires keys')
+  await assertRejects(() => format.parseKeysArgs({ keys: ['a'], interval_ms: 50 }), /only valid with repeat/, 'auv_keys rejects interval_ms alone')
+  await assertRejects(() => format.parseScrollArgs({}), /requires "dy"/, 'auv_scroll requires dy')
+  await assertRejects(
+    () => format.parseScrollArgs({ dy: 10 }),
+    /requires "window_id", or both "x" and "y"/,
+    'auv_scroll requires a window or a screen point',
+  )
+  assertEqual(format.parseScrollArgs({ dy: 10, window_id: '9', x: 2, y: 3 }).windowId, '9', 'auv_scroll window point')
+  await assertRejects(() => format.parseActivateArgs({}), /Missing required parameter "application_id"/, 'auv_activate requires application_id')
+
+  // Request builders.
+  const press = format.buildPressKeysRequest({ keys: ['cmd', 'l'], repeat: 3, intervalMs: 120, applicationId: 'com.x', policy: 3 })
+  assertEqual(press.options, { keys: ['cmd', 'l'], count: 3, interval: 120 }, 'pressKeys options')
+  assertEqual(press.target, { recipient: { case: 'applicationId', value: 'com.x' } }, 'pressKeys app recipient')
+  assertEqual(press.policy, 3, 'pressKeys policy')
+  assertEqual(press.dryRun, false, 'pressKeys dryRun')
+  const foreground = format.buildPressKeysRequest({ keys: ['return'], policy: 3 })
+  assertEqual(foreground.target, { recipient: { case: 'foreground', value: true } }, 'pressKeys foreground recipient')
+  assertEqual(format.buildClickOptions({ button: undefined }), undefined, 'left click has no options')
+  assertEqual(format.buildClickOptions({ button: 'right', mouseButton: 2 }), { button: 2 }, 'right click options')
+  assertEqual(format.displaySelector('1'), { selector: { case: 'display', value: { displayId: '1' } } }, 'display selector')
+  assertEqual(format.formatTargetString({ windowId: '9' }), 'window:9', 'target string window')
+  assertEqual(format.formatTargetString({ applicationId: 'com.x' }), 'app:com.x', 'target string application')
+
+  // Value mappers produce the CLI receipt shapes.
+  const row = format.mapWindowRow(
+    {
+      applicationName: 'App',
+      applicationId: 'com.x',
+      frame: { x: 1, y: 2, width: 300, height: 200 },
+      isMain: true,
+      isVisible: true,
+      processId: 42,
+      ref: { windowId: '9' },
+      state: { isMinimized: true, isFocused: false, stackIndex: 2, desktop: { id: 'desk', isCurrent: true } },
+      title: 'Title',
+    },
+    '9',
+  )
+  assertEqual(row.reference, { id: '9' }, 'mapped window reference id')
+  assertEqual(row.application_id, 'com.x', 'mapped window application id')
+  assertEqual(row.app_name, 'App', 'mapped window app name')
+  assertEqual(row.frame, { origin: { x: 1, y: 2 }, size: { width: 300, height: 200 } }, 'mapped window frame')
+  assertEqual(row.state.is_minimized, true, 'mapped window minimized state')
+  assertEqual(row.state.desktop, 'desk', 'mapped window desktop scalar')
+  const match = format.mapTextMatch({ text: 'OK', confidence: 0.9, bounds: { x: 1, y: 2, width: 30, height: 40 } })
+  assertEqual(match, { bounds: { origin: { x: 1, y: 2 }, size: { width: 30, height: 40 } }, confidence: 0.9, text: 'OK' }, 'mapped text match')
+  const frame = format.mapCapturedFrame({ backend: 'xcap.macos', scaleFactor: 1, bounds: { x: 0, y: 0, width: 100, height: 50 }, ref: { captureId: 'cap-1' } })
+  assertEqual(frame.bounds, { origin: { x: 0, y: 0 }, size: { width: 100, height: 50 } }, 'mapped capture bounds')
+  assertEqual(frame.scale_factor, 1, 'mapped capture scale factor')
+  const sizedFrame = format.mapCapturedFrame({ scaleFactor: 2, pixelSize: { width: 200, height: 100 } })
+  assertEqual(sizedFrame.pixel_dimensions, { width: 200, height: 100 }, 'mapped capture pixel dimensions')
+  const activated = format.mapActivateResult({
+    requestedApplicationId: 'com.x',
+    applicationIdKind: 1,
+    method: 1,
+    verification: { verification: { case: 'foregroundMismatch', value: { observedApplicationId: 'com.y' } } },
+  })
+  assertEqual(activated.application_id_kind, 'bundle_id', 'mapped activation id kind')
+  assertEqual(activated.method, 'apple_script_activate', 'mapped activation method')
+  assertEqual(activated.verification.status, 'foreground_mismatch', 'mapped activation verification')
+  const nullRow = format.mapWindowRow(null, '9')
+  assertEqual(nullRow.reference.id, '9', 'mapWindowRow tolerates a null window')
+  assertEqual(nullRow.application_id, null, 'mapWindowRow maps a missing application id to null')
+}
+
+async function checkSdkCliDefault() {
+  const previous = process.env.AUV_DSH_TRANSPORT
+  process.env.AUV_DSH_TRANSPORT = 'cli'
+  try {
+    const sdk = await import(pathToFileURL(path.join(SRC, 'transport', 'sdk.mjs')).href)
+    sdk.resetSdkTransportState()
+    assert(!sdk.sdkTransportIfStarted(), 'sdkTransportIfStarted() must be null before any call')
+    assertEqual(await sdk.activeSdkTransport(), null, 'cli mode must not start the SDK transport')
+    const status = sdk.sdkTransportStatus()
+    assertEqual(status.mode, 'cli', 'cli-mode status')
+    assertEqual(status.started, false, 'cli mode must not start a daemon')
+    assertEqual(status.pid, null, 'cli mode must not spawn a daemon process')
+    sdk.resetSdkTransportState()
+  } finally {
+    if (previous === undefined) delete process.env.AUV_DSH_TRANSPORT
+    else process.env.AUV_DSH_TRANSPORT = previous
+  }
+}
+
+async function checkSdkAutoFallback() {
+  const previousTransport = process.env.AUV_DSH_TRANSPORT
+  const previousBin = process.env.AUV_BIN
+  const previousWarn = console.warn
+  const warnings = []
+  process.env.AUV_DSH_TRANSPORT = 'auto'
+  process.env.AUV_BIN = path.join(ROOT, 'missing-auv-for-sdk-test')
+  console.warn = (...args) => {
+    warnings.push(args.map((entry) => String(entry)).join(' '))
+  }
+  try {
+    const sdk = await import(pathToFileURL(path.join(SRC, 'transport', 'sdk.mjs')).href)
+    sdk.resetSdkTransportState()
+    assertEqual(await sdk.activeSdkTransport(), null, 'auto mode must fall back to the CLI when the SDK cannot start')
+    assertEqual(warnings.length, 1, `auto fallback must warn exactly once, warned ${warnings.length} time(s)`)
+    assert(/Falling back to the auv CLI/.test(warnings[0]), `auto fallback warning text: ${warnings[0]}`)
+    const status = sdk.sdkTransportStatus()
+    assertEqual(status.fallback, true, 'auto fallback status')
+    assertEqual(status.started, false, 'auto fallback must not leave a daemon running')
+    assertEqual(status.pid, null, 'auto fallback must not leave a daemon process')
+    assertEqual(await sdk.activeSdkTransport(), null, 'auto fallback is permanent for the process')
+    assertEqual(warnings.length, 1, 'auto fallback warns once, not on every call')
+    sdk.resetSdkTransportState()
+  } finally {
+    console.warn = previousWarn
+    if (previousTransport === undefined) delete process.env.AUV_DSH_TRANSPORT
+    else process.env.AUV_DSH_TRANSPORT = previousTransport
+    if (previousBin === undefined) delete process.env.AUV_BIN
+    else process.env.AUV_BIN = previousBin
+  }
 }
 
 async function checkManifestAndResources() {
@@ -313,7 +518,7 @@ async function checkManifestAndResources() {
   assert(typeof manifest.exports?.['./locale/*.json'] === 'string', 'package must export ./locale/*.json')
   assert(typeof manifest.exports?.['./icon'] === 'string', 'package must export ./icon')
 
-  for (const file of ['index.js', 'cordis.patch.yml', 'icon.svg', 'locale/en.json', 'locale/zh.json', 'src/auv.mjs', 'src/tools.mjs', 'src/catalog-data.mjs', 'dist/index.mjs']) {
+  for (const file of ['index.js', 'cordis.patch.yml', 'icon.svg', 'locale/en.json', 'locale/zh.json', 'src/auv.mjs', 'src/tools.mjs', 'src/catalog-data.mjs', 'src/transport/config.mjs', 'src/transport/sdk-format.mjs', 'src/transport/sdk.mjs', 'dist/index.mjs']) {
     assert(existsSync(path.join(PLUGIN, file)), `missing required file ${file}`)
   }
 
@@ -485,30 +690,42 @@ async function checkCatalog() {
 }
 
 async function checkOfflineExecuteGuards() {
-  const { createTools, targetTypeName } = await import(pathToFileURL(path.join(SRC, 'tools.mjs')).href)
-  const byName = new Map(createTools().map((tool) => [tool.name, tool]))
-  const exec = { signal: new AbortController().signal }
+  const previousTransport = process.env.AUV_DSH_TRANSPORT
+  process.env.AUV_DSH_TRANSPORT = 'cli'
+  try {
+    const { createTools, targetTypeName } = await import(pathToFileURL(path.join(SRC, 'tools.mjs')).href)
+    const sdk = await import(pathToFileURL(path.join(SRC, 'transport', 'sdk.mjs')).href)
+    sdk.resetSdkTransportState()
+    const byName = new Map(createTools().map((tool) => [tool.name, tool]))
+    const exec = { signal: new AbortController().signal }
 
-  assertEqual(targetTypeName('app:com.apple.TextEdit'), 'application', 'target type name for app: targets')
-  assertEqual(targetTypeName('window:1234'), 'window', 'target type name for window: targets')
-  assertEqual(targetTypeName('display:1'), 'display', 'target type name for display: targets')
+    assertEqual(targetTypeName('app:com.apple.TextEdit'), 'application', 'target type name for app: targets')
+    assertEqual(targetTypeName('window:1234'), 'window', 'target type name for window: targets')
+    assertEqual(targetTypeName('display:1'), 'display', 'target type name for display: targets')
 
-  await assertRejects(() => byName.get('auv_click').execute({}, exec), /requires either "text"/, 'auv_click must reject an empty click')
-  await assertRejects(() => byName.get('auv_click').execute({ text: 'OK', x: 1, y: 2 }, exec), /not both forms/, 'auv_click must reject text plus coordinates')
-  await assertRejects(() => byName.get('auv_type').execute({}, exec), /Missing required parameter "text"/, 'auv_type must require text')
-  await assertRejects(() => byName.get('auv_keys').execute({ keys: [] }, exec), /non-empty array/, 'auv_keys must require a non-empty keys array')
-  await assertRejects(() => byName.get('auv_keys').execute({ keys: ['a'], interval_ms: 50 }, exec), /only valid with repeat/, 'auv_keys must reject interval_ms without repeat')
-  await assertRejects(() => byName.get('auv_keys').execute({ keys: ['a'], repeat: 2, interval_ms: 0 }, exec), /positive integer/, 'auv_keys must reject a non-positive interval_ms')
-  await assertRejects(() => byName.get('auv_scroll').execute({}, exec), /requires "dy"/, 'auv_scroll must require dy')
-  await assertRejects(() => byName.get('auv_ocr').execute({ text: 'Hello', timeout_ms: 5000 }, exec), /only valid with wait/, 'auv_ocr must reject timeout_ms without wait')
-  await assertRejects(() => byName.get('auv_screenshot').execute({ window_id: '1', display_id: '1' }, exec), /only one of/, 'auv_screenshot must reject competing targets')
-  await assertRejects(() => byName.get('auv_invoke').execute({}, exec), /Missing required parameter "command_id"/, 'auv_invoke must require command_id')
-  if (process.platform === 'darwin') {
-    await assertRejects(
-      () => byName.get('auv_scroll').execute({ dy: 10, x: 1, y: 2 }, exec),
-      /macOS cannot scroll at a screen point/,
-      'auv_scroll must fail fast for screen-point scrolling on macOS',
-    )
+    // Validation happens before any AUV call; in cli mode nothing may spawn.
+    await assertRejects(() => byName.get('auv_click').execute({}, exec), /requires either "text"/, 'auv_click must reject an empty click')
+    await assertRejects(() => byName.get('auv_click').execute({ text: 'OK', x: 1, y: 2 }, exec), /not both forms/, 'auv_click must reject text plus coordinates')
+    await assertRejects(() => byName.get('auv_type').execute({}, exec), /Missing required parameter "text"/, 'auv_type must require text')
+    await assertRejects(() => byName.get('auv_keys').execute({ keys: [] }, exec), /non-empty array/, 'auv_keys must require a non-empty keys array')
+    await assertRejects(() => byName.get('auv_keys').execute({ keys: ['a'], interval_ms: 50 }, exec), /only valid with repeat/, 'auv_keys must reject interval_ms without repeat')
+    await assertRejects(() => byName.get('auv_keys').execute({ keys: ['a'], repeat: 2, interval_ms: 0 }, exec), /positive integer/, 'auv_keys must reject a non-positive interval_ms')
+    await assertRejects(() => byName.get('auv_scroll').execute({}, exec), /requires "dy"/, 'auv_scroll must require dy')
+    await assertRejects(() => byName.get('auv_ocr').execute({ text: 'Hello', timeout_ms: 5000 }, exec), /only valid with wait/, 'auv_ocr must reject timeout_ms without wait')
+    await assertRejects(() => byName.get('auv_screenshot').execute({ window_id: '1', display_id: '1' }, exec), /only one of/, 'auv_screenshot must reject competing targets')
+    await assertRejects(() => byName.get('auv_invoke').execute({}, exec), /Missing required parameter "command_id"/, 'auv_invoke must require command_id')
+    if (process.platform === 'darwin') {
+      await assertRejects(
+        () => byName.get('auv_scroll').execute({ dy: 10, x: 1, y: 2 }, exec),
+        /macOS cannot scroll at a screen point/,
+        'auv_scroll must fail fast for screen-point scrolling on macOS',
+      )
+    }
+    assertEqual(sdk.sdkTransportStatus().started, false, 'cli-mode execute guards must not start a daemon')
+    sdk.resetSdkTransportState()
+  } finally {
+    if (previousTransport === undefined) delete process.env.AUV_DSH_TRANSPORT
+    else process.env.AUV_DSH_TRANSPORT = previousTransport
   }
 }
 
@@ -588,13 +805,34 @@ async function checkBundle() {
   assert(nonNodeImports.length === 0, `dist/index.mjs must only import node: builtins, found: ${nonNodeImports.join(', ')}`)
   assert(!source.includes('import("./') && !source.includes("import('./"), 'dist/index.mjs must not dynamically import local modules')
 
+  // The @auv-js/sdk node graph must be inlined into the single-file bundle.
+  const distSize = statSync(distPath).size
+  assert(distSize > 600_000, `dist/index.mjs should inline @auv-js/sdk (>600 kB); got ${distSize} bytes (run pnpm build)`)
+  assert(
+    source.includes('AUV daemon exited before becoming healthy') || source.includes('@grpc/grpc-js'),
+    'dist/index.mjs must inline the @auv-js/sdk daemon/gRPC client (marker strings missing; run pnpm build)',
+  )
+
   const bundle = await import(`${pathToFileURL(distPath).href}?check=${Date.now()}`)
   assertEqual(bundle.inject, ['tools'], "bundle must export inject = ['tools']")
   assert(typeof bundle.apply === 'function', 'bundle must export apply(ctx)')
   const registered = []
-  bundle.apply({ tools: { register(definition) { registered.push(definition) } } })
+  const disposers = []
+  bundle.apply({
+    tools: {
+      register(definition) {
+        registered.push(definition)
+      },
+    },
+    effect(callback) {
+      disposers.push(callback())
+    },
+  })
   assertEqual(registered.length, 11, 'bundled apply() should register 11 tools')
   assert(new Set(registered.map((definition) => definition.name)).size === 11, 'bundled apply() registered duplicate tool names')
+  assertEqual(disposers.length, 1, 'bundled apply() must register the SDK transport dispose effect')
+  assert(typeof disposers[0] === 'function', 'bundled dispose effect must return a disposer')
+  await disposers[0]()
 
   const help = registered.find((definition) => definition.name === 'auv_help')
   const value = await help.execute({}, { signal: new AbortController().signal })
@@ -609,10 +847,14 @@ async function main() {
   await check('tool definitions', checkToolDefinitions)
   await check('plugin entry point', checkEntryPoint)
   await check('manifest, patch, locales, icon', checkManifestAndResources)
+  await check('transport config (AUV_DSH_TRANSPORT)', checkTransportConfig)
+  await check('SDK argument mapping', checkSdkArgumentMapping)
+  await check('SDK transport disabled in cli mode', checkSdkCliDefault)
+  await check('SDK auto-mode CLI fallback', checkSdkAutoFallback)
   await check('catalog data mirror', checkCatalogData)
-  await check('bundled dist/index.mjs', checkBundle)
   await check('offline execute guards', checkOfflineExecuteGuards)
   await check('catalog contract', checkCatalog)
+  await check('bundled dist/index.mjs', checkBundle)
 
   console.log('')
   if (failures.length === 0) {
