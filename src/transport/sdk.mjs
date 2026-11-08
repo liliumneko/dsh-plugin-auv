@@ -51,13 +51,23 @@ import {
 
 import { AuvError, clampTimeout, permissionHint, resolveAuvBinary } from '../auv.mjs'
 import {
+  CAPTURE_STATE_MAX_SIZE,
+  COORDINATE_NOTE,
   INPUT_POLICY_VALUES,
   PERMISSION_RECOMMENDATION,
   activationWarning,
   buildClickOptions,
+  buildDragMovement,
   buildPressKeysRequest,
+  captureTargetKey,
+  captureTargetPlan,
+  compareRgbaFrames,
+  createCaptureStateStore,
+  displayPointFromScreenPoint,
   displaySelector,
+  enrichTextMatches,
   formatTargetString,
+  frameChanged,
   mapActivateResult,
   mapCapturedFrame,
   mapDisplay,
@@ -65,8 +75,16 @@ import {
   mapWindowRow,
   messageOf,
   normalizeMessage,
+  normalizePoint,
   permissionsAllOk,
+  planKeysDelivery,
+  pollForChange,
+  rectCenter,
+  screenPointFromDisplayPoint,
+  screenPointFromWindowPoint,
   summarizePermissions,
+  thumbhashOf,
+  windowPointFromScreenPoint,
 } from './sdk-format.mjs'
 
 // ---------------------------------------------------------------------------
@@ -75,7 +93,49 @@ import {
 
 const RUNNER_CLASS = 'auv.core.local'
 const CAPTURE_MAX_SIZE = 2048
-const CAPTURE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
+// Screenshots are temporary: they exist only so `read_image` can open the path
+// returned by a tool call. The default keeps one hour (and 200 files); both
+// limits can be overridden for long-running sessions.
+const CAPTURE_RETENTION_MS = 60 * 60 * 1000
+const CAPTURE_MAX_FILES = 200
+
+function envNonNegativeInteger(name, fallback) {
+  const raw = (process.env[name] ?? '').trim()
+  if (raw === '') return fallback
+  const value = Number(raw)
+  return Number.isFinite(value) && value >= 0 ? Math.floor(value) : fallback
+}
+
+function captureRetentionMs() {
+  return envNonNegativeInteger('AUV_DSH_CAPTURE_RETENTION_MS', CAPTURE_RETENTION_MS)
+}
+
+function captureMaxFiles() {
+  return envNonNegativeInteger('AUV_DSH_CAPTURE_MAX_FILES', CAPTURE_MAX_FILES)
+}
+
+// In-memory snapshots for `auv_capture_state` -> `auv_wait_for_change`
+// (pixel-ratio comparison). Bounded LRU + 5-minute TTL; never written to disk.
+const captureStateStore = createCaptureStateStore()
+const CAPTURE_STATE_INVALID_MESSAGE =
+  'The state_token is unknown or expired. Call auv_capture_state immediately before the action, then pass the new state_token to auv_wait_for_change.'
+
+/**
+ * Resolve a `auv_capture_state` token without touching the transport.
+ * Throws a clear `AuvError` when the token is unknown/expired.
+ */
+export function requireCaptureState(token) {
+  const state = captureStateStore.get(token)
+  if (state === null) {
+    throw new AuvError(CAPTURE_STATE_INVALID_MESSAGE, { code: 'AUV_STATE_TOKEN_INVALID' })
+  }
+  return state
+}
+
+/** Test-only: drop every stored capture-state snapshot. */
+export function resetCaptureStateStore() {
+  captureStateStore.clear()
+}
 const DEFAULT_ATTACH_TIMEOUT_MS = 2_000
 const DEFAULT_STARTUP_TIMEOUT_MS = 15_000
 const DEFAULT_CONNECT_TIMEOUT_MS = 10_000
@@ -477,6 +537,9 @@ async function writeCaptureFile(image, capture) {
   const captureId = typeof capture?.ref?.captureId === 'string' ? capture.ref.captureId.replace(/[^a-zA-Z0-9._-]/gu, '_') : 'capture'
   const filePath = path.join(directory, `${Date.now()}-${captureId}-${randomUUID().slice(0, 8)}.webp`)
   await writeFile(filePath, image.data)
+  // A new artifact is the natural moment to drop stale ones; keep this off the
+  // tool's critical path and ignore cleanup errors.
+  void pruneCaptures().catch(() => {})
   return filePath
 }
 
@@ -491,26 +554,49 @@ function captureArtifactRecord(image, filePath) {
   }
 }
 
-/** Best-effort deletion of capture files older than the retention window. */
-async function pruneCaptures() {
-  const directory = sdkCaptureRoot()
+/**
+ * Best-effort cleanup of capture files. Deletes `.webp` files older than the
+ * retention window and anything beyond the newest `maxFiles` entries. Called
+ * after every screenshot and when the transport starts, so the folder does not
+ * keep a week of screenshots just because the daemon stayed up.
+ */
+export async function pruneCaptures({
+  directory = sdkCaptureRoot(),
+  retentionMs = captureRetentionMs(),
+  maxFiles = captureMaxFiles(),
+  now = Date.now(),
+} = {}) {
   let entries
   try {
     entries = await readdir(directory)
   } catch {
-    return
+    return { deleted: 0, kept: 0 }
   }
-  const now = Date.now()
+  const files = []
   for (const entry of entries) {
     if (!entry.endsWith('.webp')) continue
     const filePath = path.join(directory, entry)
     try {
       const info = await stat(filePath)
-      if (now - info.mtimeMs > CAPTURE_RETENTION_MS) await unlink(filePath)
+      files.push({ filePath, mtimeMs: info.mtimeMs })
+    } catch {
+      /* ignore individual races */
+    }
+  }
+  files.sort((a, b) => b.mtimeMs - a.mtimeMs)
+  let deleted = 0
+  for (const [index, file] of files.entries()) {
+    const tooOld = retentionMs > 0 && now - file.mtimeMs > retentionMs
+    const beyondCap = maxFiles > 0 && index >= maxFiles
+    if (!tooOld && !beyondCap) continue
+    try {
+      await unlink(file.filePath)
+      deleted += 1
     } catch {
       /* ignore individual file races */
     }
   }
+  return { deleted, kept: files.length - deleted }
 }
 
 // ---------------------------------------------------------------------------
@@ -687,58 +773,148 @@ async function resolveWindowClient(context, plan, signal) {
   return null
 }
 
+/**
+ * Capture one LOGICAL frame for the plan's target and return the SDK response
+ * pieces the typed tools need. Shared by screenshot and wait-for-change so both
+ * use identical target precedence.
+ */
+async function captureTarget(context, plan, signal) {
+  if (plan.windowId !== undefined || plan.applicationId !== undefined) {
+    const client = await resolveWindowClient(context, plan, signal)
+    const response = await client.capture({ resolution: CaptureResolution.LOGICAL, signal })
+    return {
+      mode: 'window',
+      commandId: 'window.capture',
+      client,
+      window: response.window ?? client.window ?? null,
+      windowFrame: response.window?.frame ?? client.window?.frame ?? null,
+      display: response.display ?? null,
+      capture: response.capture,
+    }
+  }
+  if (plan.region !== undefined) {
+    const selector = plan.displayId !== undefined ? displaySelector(plan.displayId) : undefined
+    const response = await context.runner.displays.captureRegion(plan.region, selector, {
+      resolution: CaptureResolution.LOGICAL,
+      signal,
+    })
+    return {
+      mode: 'region',
+      commandId: 'display.captureRegion',
+      client: null,
+      window: response.window ?? null,
+      windowFrame: null,
+      display: response.display ?? null,
+      capture: response.capture,
+    }
+  }
+  if (plan.displayId !== undefined) {
+    const response = await context.runner.displays.capture(displaySelector(plan.displayId), {
+      resolution: CaptureResolution.LOGICAL,
+      signal,
+    })
+    return {
+      mode: 'display',
+      commandId: 'display.capture',
+      client: null,
+      window: response.window ?? null,
+      windowFrame: null,
+      display: response.display ?? null,
+      capture: response.capture,
+    }
+  }
+  const response = await context.runner.displays.capture(undefined, {
+    resolution: CaptureResolution.LOGICAL,
+    signal,
+  })
+  return {
+    mode: 'screen',
+    commandId: 'display.capture',
+    client: null,
+    window: response.window ?? null,
+    windowFrame: null,
+    display: response.display ?? null,
+    capture: response.capture,
+  }
+}
+
+/**
+ * Resolve the plan's target once and return a `capture()` function plus the
+ * mode. Shared by `auv_capture_state` and `auv_wait_for_change` so repeated
+ * polls do not re-resolve a window every interval.
+ */
+async function resolveCaptureSource(context, plan, signal) {
+  if (plan.windowId !== undefined || plan.applicationId !== undefined) {
+    const client = await resolveWindowClient(context, plan, signal)
+    return {
+      mode: 'window',
+      windowFrame: client.window?.frame ?? null,
+      capture: async () => (await client.capture({ resolution: CaptureResolution.LOGICAL, signal })).capture,
+    }
+  }
+  if (plan.region !== undefined) {
+    const selector = plan.displayId !== undefined ? displaySelector(plan.displayId) : undefined
+    return {
+      mode: 'region',
+      windowFrame: null,
+      capture: async () =>
+        (await context.runner.displays.captureRegion(plan.region, selector, { resolution: CaptureResolution.LOGICAL, signal }))
+          .capture,
+    }
+  }
+  if (plan.displayId !== undefined) {
+    return {
+      mode: 'display',
+      windowFrame: null,
+      capture: async () =>
+        (await context.runner.displays.capture(displaySelector(plan.displayId), {
+          resolution: CaptureResolution.LOGICAL,
+          signal,
+        })).capture,
+    }
+  }
+  return {
+    mode: 'screen',
+    windowFrame: null,
+    capture: async () =>
+      (await context.runner.displays.capture(undefined, { resolution: CaptureResolution.LOGICAL, signal })).capture,
+  }
+}
+
 async function screenshot(context, plan, exec, timeoutMs) {
   const call = beginCall(exec?.signal, timeoutMs)
   try {
     const warnings = []
-    let commandId
-    let response
-    if (plan.windowId !== undefined || plan.applicationId !== undefined) {
-      if (plan.applicationId !== undefined) {
-        warnings.push("Capturing the application's main visible window; pass window_id to choose a specific window.")
-      }
-      const client = await resolveWindowClient(context, plan, call.signal)
-      response = await client.capture({ resolution: CaptureResolution.LOGICAL, signal: call.signal })
-      commandId = 'window.capture'
-    } else if (plan.displayId !== undefined) {
-      response = await context.runner.displays.capture(displaySelector(plan.displayId), {
-        resolution: CaptureResolution.LOGICAL,
-        signal: call.signal,
-      })
-      commandId = 'display.capture'
-    } else if (plan.region !== undefined) {
-      response = await context.runner.displays.captureRegion(plan.region, undefined, {
-        resolution: CaptureResolution.LOGICAL,
-        signal: call.signal,
-      })
-      commandId = 'display.captureRegion'
-    } else {
-      response = await context.runner.displays.capture(undefined, {
-        resolution: CaptureResolution.LOGICAL,
-        signal: call.signal,
-      })
-      commandId = 'display.capture'
+    const captured = await captureTarget(context, plan, call.signal)
+    if (plan.applicationId !== undefined) {
+      warnings.push("Capturing the application's main visible window; pass window_id to choose a specific window.")
     }
 
     // Fetch pixels in this same call: capture refs are evicted/expired later.
-    const image = await context.runner.captures.image(response.capture, {
+    const image = await context.runner.captures.image(captured.capture, {
       encoding: ImageEncoding.WEBP,
       maxSize: { width: CAPTURE_MAX_SIZE, height: CAPTURE_MAX_SIZE },
       signal: call.signal,
     })
-    const artifactPath = await writeCaptureFile(image, response.capture)
-    const resultCapture = mapCapturedFrame(response.capture)
+    const artifactPath = await writeCaptureFile(image, captured.capture)
+    const resultCapture = mapCapturedFrame(captured.capture)
+    const capturePixelSize = resultCapture?.pixel_dimensions ?? null
     if (resultCapture !== null) resultCapture.pixel_dimensions = { height: image.height, width: image.width }
     const result = { capture: resultCapture }
-    if (response.window !== undefined && response.window !== null) {
-      result.window = mapWindowRow(response.window, response.window.ref?.windowId)
+    if (captured.window !== null) {
+      result.window = mapWindowRow(captured.window, captured.window.ref?.windowId)
     }
-    if (response.display !== undefined && response.display !== null) result.display = mapDisplay(response.display)
-    return completedValue(context, commandId, {
+    if (captured.display !== null) result.display = mapDisplay(captured.display)
+    return completedValue(context, captured.commandId, {
       artifact_path: artifactPath,
       content_type: 'image/webp',
       width: image.width,
       height: image.height,
+      bounds: resultCapture?.bounds ?? null,
+      origin: resultCapture?.bounds?.origin ?? null,
+      scale_factor: resultCapture?.scale_factor ?? null,
+      pixel_size: capturePixelSize ?? { height: image.height, width: image.width },
+      coordinate_note: COORDINATE_NOTE,
       result,
       artifacts: [captureArtifactRecord(image, artifactPath)],
       warnings,
@@ -792,16 +968,35 @@ async function ocr(context, plan, exec, timeoutMs) {
       }
       timedOut = response.matches.length === 0
     }
-    const result = { matches: mapTextMatches(response.matches) }
+    // findText responses carry the capture they matched against, so each match
+    // can report its screen point, image pixel and (when windowed) window point.
+    const windowFrame = windowed ? (response.window?.frame ?? client?.window?.frame ?? null) : null
+    const result = { matches: enrichTextMatches(mapTextMatches(response.matches), response.capture ?? null, windowFrame) }
     if (response.capture !== undefined && response.capture !== null) result.capture = mapCapturedFrame(response.capture)
     if (response.display !== undefined && response.display !== null) result.display = mapDisplay(response.display)
     if (response.window !== undefined && response.window !== null) {
       result.window = mapWindowRow(response.window, response.window.ref?.windowId)
     }
-    return completedValue(context, commandId, { result, warnings: [], timed_out: timedOut })
+    return completedValue(context, commandId, {
+      result,
+      warnings: [],
+      timed_out: timedOut,
+      coordinate_note: COORDINATE_NOTE,
+    })
   } catch (error) {
     throw fail(context, error, 'ocr', call)
   }
+}
+
+/** Pull a `ScreenPoint`-shaped value out of an SDK response or computed object. */
+function pointOrNull(value) {
+  return normalizePoint(value)
+}
+
+async function displayFrameById(context, displayId, signal) {
+  const displays = await context.runner.displays.list({ signal })
+  const match = Array.isArray(displays) ? displays.find((display) => display?.displayId === displayId) : undefined
+  return match?.frame ?? null
 }
 
 async function click(context, plan, exec, timeoutMs) {
@@ -815,13 +1010,34 @@ async function click(context, plan, exec, timeoutMs) {
       if (windowed) {
         const client = await resolveWindowClient(context, plan, call.signal)
         const found = await client.findText(plan.text, { signal: call.signal })
-        const matches = mapTextMatches(found.matches)
+        const windowFrame = found.window?.frame ?? client.window?.frame ?? null
+        const matches = enrichTextMatches(mapTextMatches(found.matches), found.capture ?? null, windowFrame)
         if (matches.length === 0) {
           warnings.push(`No visible text matched "${plan.text}"; nothing was clicked.`)
-          return completedValue(context, commandId, { target, result: { matches, click: null }, warnings })
+          return completedValue(context, commandId, {
+            target,
+            result: { matches, click: null },
+            screen_point: null,
+            window_point: null,
+            coordinate_note: COORDINATE_NOTE,
+            warnings,
+          })
         }
         const response = await client.click({ bounds: found.matches[0].bounds }, undefined, { signal: call.signal })
-        return completedValue(context, commandId, { target, result: { matches, click: normalizeMessage(response) }, warnings })
+        const clickResult = normalizeMessage(response)
+        const screenPoint = pointOrNull(clickResult.screen_point) ?? rectCenter(found.matches[0].bounds)
+        const windowPoint =
+          windowFrame === null
+            ? null
+            : (pointOrNull(clickResult.window_point) ?? (screenPoint === null ? null : windowPointFromScreenPoint(screenPoint, windowFrame)))
+        return completedValue(context, commandId, {
+          target,
+          result: { matches, click: clickResult },
+          screen_point: screenPoint,
+          window_point: windowPoint,
+          coordinate_note: COORDINATE_NOTE,
+          warnings,
+        })
       }
       const findOptions = { signal: call.signal }
       if (plan.within !== undefined) {
@@ -833,31 +1049,85 @@ async function click(context, plan, exec, timeoutMs) {
         }
       }
       const found = await context.runner.displays.findText(undefined, plan.text, findOptions)
-      const matches = mapTextMatches(found.matches)
+      const matches = enrichTextMatches(mapTextMatches(found.matches), found.capture ?? null, null)
       if (matches.length === 0) {
         warnings.push(`No visible text matched "${plan.text}"; nothing was clicked.`)
-        return completedValue(context, commandId, { target, result: { matches, click: null }, warnings })
+        return completedValue(context, commandId, {
+          target,
+          result: { matches, click: null },
+          screen_point: null,
+          window_point: null,
+          coordinate_note: COORDINATE_NOTE,
+          warnings,
+        })
       }
       const response = await context.runner.input.click({ bounds: found.matches[0].bounds }, undefined, { signal: call.signal })
-      return completedValue(context, commandId, { target, result: { matches, click: normalizeMessage(response) }, warnings })
+      const clickResult = normalizeMessage(response)
+      return completedValue(context, commandId, {
+        target,
+        result: { matches, click: clickResult },
+        screen_point: pointOrNull(clickResult.screen_point) ?? rectCenter(found.matches[0].bounds),
+        window_point: null,
+        coordinate_note: COORDINATE_NOTE,
+        warnings,
+      })
     }
 
     const commandId = 'input.clickPoint'
     const target = formatTargetString(plan)
+    const space = plan.space ?? 'screen'
     const clickOptions = buildClickOptions({
       button: plan.button,
       mouseButton: plan.button === undefined ? undefined : MOUSE_BUTTONS[plan.button],
     })
     let response
-    if (plan.windowId !== undefined || plan.applicationId !== undefined) {
+    let clickResult
+    let screenPoint = null
+    let windowPoint = null
+    let displayPoint = null
+    if (space === 'window') {
       const client = await resolveWindowClient(context, plan, call.signal)
       response = await client.click({ x: plan.x, y: plan.y }, clickOptions, { signal: call.signal })
-    } else if (plan.displayId !== undefined) {
-      response = await context.runner.input.click(Position.display(plan.displayId, plan.x, plan.y), clickOptions, { signal: call.signal })
+      clickResult = normalizeMessage(response)
+      windowPoint = pointOrNull(clickResult.window_point) ?? { x: plan.x, y: plan.y }
+      const frame = clickResult.window?.frame ?? client.window?.frame ?? null
+      screenPoint =
+        pointOrNull(clickResult.screen_point) ?? (frame === null ? null : screenPointFromWindowPoint(windowPoint, frame))
+    } else if (space === 'display') {
+      const frame = await displayFrameById(context, plan.displayId, call.signal)
+      response = await context.runner.input.click(Position.display(plan.displayId, plan.x, plan.y), clickOptions, {
+        signal: call.signal,
+      })
+      clickResult = normalizeMessage(response)
+      displayPoint = { x: plan.x, y: plan.y }
+      screenPoint =
+        pointOrNull(clickResult.screen_point) ?? (frame === null ? null : screenPointFromDisplayPoint(displayPoint, frame))
     } else {
+      // Logical screen point delivered as a foreground global click. This is
+      // the Unity/Canvas-safe form: no window-targeted delivery is involved.
       response = await context.runner.input.click(Position.screen(plan.x, plan.y), clickOptions, { signal: call.signal })
+      clickResult = normalizeMessage(response)
+      screenPoint = pointOrNull(clickResult.screen_point) ?? { x: plan.x, y: plan.y }
+      if (plan.windowId !== undefined || plan.applicationId !== undefined) {
+        const client = await resolveWindowClient(context, plan, call.signal)
+        const frame = client.window?.frame ?? null
+        if (frame !== null) windowPoint = windowPointFromScreenPoint(screenPoint, frame)
+      } else if (plan.displayId !== undefined) {
+        const frame = await displayFrameById(context, plan.displayId, call.signal)
+        if (frame !== null) displayPoint = displayPointFromScreenPoint(screenPoint, frame)
+      }
     }
-    return completedValue(context, commandId, { target, result: normalizeMessage(response), warnings })
+    return completedValue(context, commandId, {
+      target,
+      space,
+      result: clickResult,
+      screen_point: screenPoint,
+      window_point: windowPoint,
+      display_point: displayPoint,
+      coordinate_note: COORDINATE_NOTE,
+      warnings,
+    })
+
   } catch (error) {
     throw fail(context, error, 'click', call)
   }
@@ -917,28 +1187,65 @@ async function type(context, plan, exec, timeoutMs) {
   }
 }
 
+const KEYS_DELIVERY_WARNING =
+  'AUV confirms key delivery only; it does not prove the app reacted. Pair auv_keys with auv_wait_for_change (or a fresh auv_screenshot) to verify the effect.'
+
 async function keys(context, plan, exec, timeoutMs) {
   const call = beginCall(exec?.signal, timeoutMs)
   try {
+    const delivery = planKeysDelivery(plan)
     const client = await resolveWindowClient(context, plan, call.signal)
+    const warnings = []
+
+    // Inactive targets can swallow the first key event, so focus before sending
+    // when a target was given (default) and `focus` was not turned off.
+    let focusEvidence = null
+    if (delivery.focus && client !== null) {
+      if (plan.windowId !== undefined) {
+        const mutation = await client.setFocus({ signal: call.signal })
+        focusEvidence = { via: 'window.setFocus', result: normalizeMessage(mutation) }
+      } else {
+        const activation = await context.runner.applications.activate({ applicationId: plan.applicationId }, { signal: call.signal })
+        focusEvidence = { via: 'application.activate', result: mapActivateResult(activation) }
+        const warning = activationWarning(activation)
+        if (warning !== null) warnings.push(warning)
+      }
+    }
+
+    const policyValue = inputPolicyValue(delivery.effectivePolicy) ?? InputPolicy.FOREGROUND_PREFERRED
     let response
-    if (client !== null) {
-      response = await client.pressKeys(plan.keys, {
-        count: plan.repeat !== undefined && plan.repeat > 1 ? plan.repeat : undefined,
-        interval: plan.repeat !== undefined && plan.repeat > 1 ? (plan.intervalMs ?? 50) : undefined,
-      }, { signal: call.signal })
+    if (client !== null && delivery.deliveryVia === 'window') {
+      response = await client.pressKeys(
+        plan.keys,
+        {
+          count: plan.repeat !== undefined && plan.repeat > 1 ? plan.repeat : undefined,
+          interval: plan.repeat !== undefined && plan.repeat > 1 ? (plan.intervalMs ?? 50) : undefined,
+          policy: policyValue,
+        },
+        { signal: call.signal },
+      )
     } else {
       const request = buildPressKeysRequest({
         keys: plan.keys,
         repeat: plan.repeat,
         intervalMs: plan.intervalMs,
-        applicationId: plan.applicationId,
-        policy: InputPolicy.FOREGROUND_PREFERRED,
+        applicationId: undefined,
+        policy: policyValue,
         dryRun: false,
       })
       response = await context.runner.input.pressKeys(request, { signal: call.signal })
     }
-    return completedValue(context, 'input.pressKeys', { target: formatTargetString(plan), result: normalizeMessage(response), warnings: [] })
+    warnings.push(KEYS_DELIVERY_WARNING)
+    return completedValue(context, 'input.pressKeys', {
+      target: formatTargetString(plan),
+      policy: delivery.effectivePolicy,
+      focus: delivery.focus,
+      focus_target: delivery.focusTarget,
+      focus_evidence: focusEvidence,
+      delivery_via: delivery.deliveryVia,
+      result: normalizeMessage(response),
+      warnings,
+    })
   } catch (error) {
     throw fail(context, error, 'keys', call)
   }
@@ -951,8 +1258,8 @@ async function scroll(context, plan, exec, timeoutMs) {
       const client = await context.runner.windows.get(plan.windowId, { signal: call.signal })
       let pointX = plan.x
       let pointY = plan.y
+      const frame = client.window?.frame
       if (pointX === undefined || pointY === undefined) {
-        const frame = client.window?.frame
         const width = Number(frame?.width)
         const height = Number(frame?.height)
         if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
@@ -969,7 +1276,17 @@ async function scroll(context, plan, exec, timeoutMs) {
         undefined,
         { signal: call.signal },
       )
-      return completedValue(context, 'window.scroll', { result: normalizeMessage(response), warnings: [] })
+      const scrollResult = normalizeMessage(response)
+      const windowPoint = pointOrNull(scrollResult.point) ?? { x: pointX, y: pointY }
+      const refreshedFrame = scrollResult.window?.frame ?? frame ?? null
+      const screenPoint = refreshedFrame === null || refreshedFrame === undefined ? null : screenPointFromWindowPoint(windowPoint, refreshedFrame)
+      return completedValue(context, 'window.scroll', {
+        result: scrollResult,
+        window_point: windowPoint,
+        screen_point: screenPoint,
+        coordinate_note: COORDINATE_NOTE,
+        warnings: [],
+      })
     }
 
     if (process.platform === 'darwin') {
@@ -986,9 +1303,302 @@ async function scroll(context, plan, exec, timeoutMs) {
       runnerClass: RUNNER_CLASS,
       signal: call.signal,
     })
-    return completedValue(context, 'input.scrollPoint', { result: normalizeMessage(response), warnings: [] })
+    const scrollResult = normalizeMessage(response)
+    return completedValue(context, 'input.scrollPoint', {
+      result: scrollResult,
+      screen_point: pointOrNull(scrollResult.screen_point) ?? { x: plan.x, y: plan.y },
+      window_point: null,
+      coordinate_note: COORDINATE_NOTE,
+      warnings: [],
+    })
   } catch (error) {
     throw fail(context, error, 'scroll', call)
+  }
+}
+
+/**
+ * Drag with a mouse button. Window/display points are converted to logical
+ * screen points with the target frame, the target is focused first when
+ * requested (macOS drags move the real pointer, and an inactive window can
+ * consume the first press), then AUV's straight-line cubic drag is delivered
+ * in the foreground.
+ */
+async function drag(context, plan, exec, timeoutMs) {
+  const call = beginCall(exec?.signal, timeoutMs)
+  const warnings = []
+  try {
+    let client = null
+    let windowFrame = null
+    let displayFrame = null
+    if (plan.windowId !== undefined || plan.applicationId !== undefined) {
+      client = await resolveWindowClient(context, plan, call.signal)
+      windowFrame = client.window?.frame ?? null
+      if (plan.activate) {
+        if (plan.windowId !== undefined) {
+          await client.setFocus({ signal: call.signal })
+        } else {
+          const activation = await context.runner.applications.activate({ applicationId: plan.applicationId }, { signal: call.signal })
+          const warning = activationWarning(activation)
+          if (warning !== null) warnings.push(warning)
+        }
+        // Focus/activation can raise or restore a window; convert points with
+        // the frame that is current after it.
+        const refreshed = await client.refresh({ signal: call.signal })
+        windowFrame = refreshed?.frame ?? windowFrame
+      }
+    } else if (plan.space === 'display') {
+      displayFrame = await displayFrameById(context, plan.displayId, call.signal)
+      if (displayFrame === null) {
+        throw new AuvError(
+          `Display "${plan.displayId}" was not found. Call auv_screenshot or auv_windows to refresh display ids.`,
+          { code: 'AUV_DISPLAY_NOT_FOUND' },
+        )
+      }
+    }
+
+    let screenStart
+    let screenEnd
+    let displayPointStart = null
+    let displayPointEnd = null
+    if (plan.space === 'window') {
+      if (windowFrame === null) {
+        throw new AuvError('AUV could not read the target window frame, so window points cannot be converted to screen points.', {
+          code: 'AUV_BAD_WINDOW_FRAME',
+        })
+      }
+      screenStart = screenPointFromWindowPoint(plan.from, windowFrame)
+      screenEnd = screenPointFromWindowPoint(plan.to, windowFrame)
+    } else if (plan.space === 'display') {
+      displayPointStart = plan.from
+      displayPointEnd = plan.to
+      screenStart = screenPointFromDisplayPoint(plan.from, displayFrame)
+      screenEnd = screenPointFromDisplayPoint(plan.to, displayFrame)
+    } else {
+      screenStart = plan.from
+      screenEnd = plan.to
+    }
+
+    const movement = buildDragMovement({ startScreen: screenStart, endScreen: screenEnd, durationMs: plan.durationMs })
+    const response = await context.runner.input.dragMouse(
+      { movement, button: MOUSE_BUTTONS[plan.button] },
+      { signal: call.signal },
+    )
+    const dragResult = normalizeMessage(response)
+    const windowStart = windowFrame === null ? null : windowPointFromScreenPoint(screenStart, windowFrame)
+    const windowEnd = windowFrame === null ? null : windowPointFromScreenPoint(screenEnd, windowFrame)
+    const displayStart = displayFrame === null ? null : displayPointFromScreenPoint(screenStart, displayFrame)
+    const displayEnd = displayFrame === null ? null : displayPointFromScreenPoint(screenEnd, displayFrame)
+    return completedValue(context, 'input.dragMouse', {
+      button: plan.button,
+      duration_ms: plan.durationMs,
+      space: plan.space,
+      from: plan.from,
+      to: plan.to,
+      screen_start: screenStart,
+      screen_end: screenEnd,
+      screen_point: pointOrNull(dragResult.point) ?? screenEnd,
+      window_point: windowStart,
+      window_start: windowStart,
+      window_end: windowEnd,
+      display_start: displayStart,
+      display_end: displayEnd,
+      action: dragResult.action ?? null,
+      result: dragResult,
+      coordinate_note: COORDINATE_NOTE,
+      warnings,
+    })
+  } catch (error) {
+    throw fail(context, error, 'drag', call)
+  }
+}
+
+/**
+ * Poll a target's ThumbHash (or a WEBP hash fallback) until it changes.
+ * Read-only: captures frames in the Runner and never writes an artifact.
+ */
+/**
+ * Capture a compact downscaled RGBA snapshot for a later
+ * `auv_wait_for_change({ state_token })` call. In-memory only: bounded LRU
+ * (20) with a 5-minute TTL, never written to disk.
+ */
+async function captureState(context, plan, exec, timeoutMs) {
+  const call = beginCall(exec?.signal, timeoutMs)
+  try {
+    const source = await resolveCaptureSource(context, plan, call.signal)
+    const frame = await source.capture()
+    const image = await context.runner.captures.image(frame, {
+      encoding: ImageEncoding.RGBA,
+      maxSize: { width: CAPTURE_STATE_MAX_SIZE, height: CAPTURE_STATE_MAX_SIZE },
+      signal: call.signal,
+    })
+    const token = randomUUID()
+    const capturedAt = Date.now()
+    const hash = thumbhashOf(frame)
+    captureStateStore.put(token, {
+      width: image.width,
+      height: image.height,
+      data: new Uint8Array(image.data),
+      hash,
+      mode: source.mode,
+      targetKey: captureTargetKey(plan),
+      target: captureTargetPlan(plan),
+      capturedAt,
+    })
+    return completedValue(context, 'frame.captureState', {
+      state_token: token,
+      hash,
+      width: image.width,
+      height: image.height,
+      mode: source.mode,
+      captured_at: new Date(capturedAt).toISOString(),
+      warnings: [],
+    })
+  } catch (error) {
+    throw fail(context, error, 'capture_state', call)
+  }
+}
+
+/**
+ * Wait for a visible change and compare it with pixel ratios instead of raw
+ * ThumbHashes, so cursor/button flicker no longer reports a story advance.
+ *
+ * Baseline resolution order:
+ *   1. `state_token` -> stored RGBA pixels (`baseline_source: 'state_token'`);
+ *   2. `baseline_hash` -> legacy ThumbHash-only comparison (`'provided'`);
+ *   3. capture a fresh baseline (`'captured'`).
+ *
+ * In pixel modes each poll fetches a downscaled RGBA frame and counts pixels
+ * whose R/G/B channels differ by more than `pixel_threshold`; the frame counts
+ * as changed when that ratio reaches `min_changed_ratio`.
+ */
+async function waitForChange(context, plan, exec, timeoutMs) {
+  const call = beginCall(exec?.signal, timeoutMs)
+  const warnings = []
+  try {
+    let baselineSource
+    let baselineSnapshot = null
+    let baselineHashValue = null
+    let storedTarget = null
+    if (plan.stateToken !== undefined) {
+      const stored = requireCaptureState(plan.stateToken)
+      baselineSource = 'state_token'
+      baselineHashValue = stored.hash ?? null
+      storedTarget = stored.target ?? null
+      baselineSnapshot = {
+        pixels: { width: stored.width, height: stored.height, data: stored.data },
+        hash: stored.hash ?? null,
+      }
+      const explicitTarget =
+        plan.windowId !== undefined ||
+        plan.applicationId !== undefined ||
+        plan.displayId !== undefined ||
+        plan.region !== undefined
+      if (explicitTarget && captureTargetKey(plan) !== stored.targetKey) {
+        warnings.push(`state_token was captured for ${stored.targetKey}; comparing that target instead of the explicit target.`)
+      }
+    } else if (plan.baselineHash !== undefined) {
+      baselineSource = 'provided'
+      baselineHashValue = plan.baselineHash
+      warnings.push('Compared ThumbHash only; pass state_token for pixel-ratio comparison.')
+    } else {
+      baselineSource = 'captured'
+    }
+
+    const effectivePlan = baselineSource === 'state_token' && storedTarget !== null ? { ...plan, ...storedTarget } : plan
+    const source = await resolveCaptureSource(context, effectivePlan, call.signal)
+    const mode = source.mode
+    let polled
+    if (baselineSource === 'provided') {
+      const captureHash = async () => {
+        const frame = await source.capture()
+        const thumb = thumbhashOf(frame)
+        if (thumb !== null) return thumb
+        const image = await context.runner.captures.image(frame, {
+          encoding: ImageEncoding.RGBA,
+          maxSize: { width: CAPTURE_STATE_MAX_SIZE, height: CAPTURE_STATE_MAX_SIZE },
+          signal: call.signal,
+        })
+        return `sha256:${createHash('sha256').update(image.data).digest('hex')}`
+      }
+      polled = await pollForChange({
+        captureSnapshot: captureHash,
+        compare: (before, after) => {
+          const changed = before !== after
+          return { changed, ratio: changed ? 1 : 0 }
+        },
+        intervalMs: plan.intervalMs,
+        timeoutMs: plan.timeoutMs,
+        signal: call.signal,
+      })
+    } else {
+      const capturePixels = async () => {
+        const frame = await source.capture()
+        const hash = thumbhashOf(frame)
+        const image = await context.runner.captures.image(frame, {
+          encoding: ImageEncoding.RGBA,
+          maxSize: { width: CAPTURE_STATE_MAX_SIZE, height: CAPTURE_STATE_MAX_SIZE },
+          signal: call.signal,
+        })
+        return {
+          pixels: { width: image.width, height: image.height, data: image.data },
+          hash: hash ?? `sha256:${createHash('sha256').update(image.data).digest('hex')}`,
+        }
+      }
+      polled = await pollForChange({
+        captureSnapshot: capturePixels,
+        compare: (before, after) => {
+          const difference = compareRgbaFrames(before.pixels, after.pixels, plan.pixelThreshold)
+          return {
+            changed: frameChanged(difference, plan.minChangedRatio),
+            ratio: difference.changedRatio,
+            dimensionMismatch: difference.dimensionMismatch,
+          }
+        },
+        baseline: baselineSnapshot === null ? undefined : baselineSnapshot,
+        intervalMs: plan.intervalMs,
+        timeoutMs: plan.timeoutMs,
+        signal: call.signal,
+      })
+    }
+
+    const afterHash =
+      baselineSource === 'provided' ? (typeof polled.after === 'string' ? polled.after : null) : (polled.after?.hash ?? null)
+    const beforeHash =
+      baselineSource === 'provided'
+        ? plan.baselineHash
+        : baselineSource === 'state_token'
+          ? baselineHashValue
+          : (polled.before?.hash ?? null)
+    if (polled.result === 'timeout') {
+      warnings.push(
+        `No change above min_changed_ratio ${plan.minChangedRatio} within ${plan.timeoutMs} ms (last changed ratio ${polled.changedRatio.toFixed(4)}). The target may be static or the previous input may have had no effect.`,
+      )
+    }
+    if (polled.result === 'no_effect') {
+      warnings.push('Waiting stopped before the timeout without observing a change.')
+    }
+    if (polled.lastComparison?.dimensionMismatch === true) {
+      warnings.push('The capture dimensions changed between frames; treated as changed.')
+    }
+    return completedValue(context, 'frame.waitForChange', {
+      result: polled.result,
+      changed: polled.changed,
+      changed_ratio: polled.changedRatio,
+      min_changed_ratio: plan.minChangedRatio,
+      pixel_threshold: plan.pixelThreshold,
+      elapsed_ms: polled.elapsedMs,
+      before_hash: beforeHash,
+      after_hash: afterHash,
+      baseline_source: baselineSource,
+      comparison: baselineSource === 'provided' ? 'hash' : 'pixels',
+      mode,
+      timeout_ms: plan.timeoutMs,
+      interval_ms: plan.intervalMs,
+      artifact_path: null,
+      warnings,
+    })
+  } catch (error) {
+    throw fail(context, error, 'wait_for_change', call)
   }
 }
 
@@ -1112,6 +1722,9 @@ function createFacade(shared) {
     type: (plan, exec, timeoutMs) => type(context, plan, exec, timeoutMs),
     keys: (plan, exec, timeoutMs) => keys(context, plan, exec, timeoutMs),
     scroll: (plan, exec, timeoutMs) => scroll(context, plan, exec, timeoutMs),
+    drag: (plan, exec, timeoutMs) => drag(context, plan, exec, timeoutMs),
+    captureState: (plan, exec, timeoutMs) => captureState(context, plan, exec, timeoutMs),
+    waitForChange: (plan, exec, timeoutMs) => waitForChange(context, plan, exec, timeoutMs),
     windows: (plan, exec, timeoutMs) => windows(context, plan, exec, timeoutMs),
     activate: (plan, exec, timeoutMs) => activate(context, plan, exec, timeoutMs),
     doctor: (exec, timeoutMs) => doctor(context, exec, timeoutMs),

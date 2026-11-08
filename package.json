@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-auv",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "description": "DeepSeek Harness plugin that exposes AUV desktop automation (screenshots, OCR, input, windows) as native model tools",
   "license": "Apache-2.0",

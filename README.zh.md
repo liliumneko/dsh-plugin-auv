@@ -6,7 +6,6 @@
 
 将 [AUV](https://github.com/moeru-ai/auv) 的操作系统自动化能力集成到 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）的原生模型工具。
 
-使用[`@auv-js/sdk`](https://www.npmjs.com/package/@auv-js/sdk)实现
 
 > [!WARNING]
 > **还请务必在此之前安装AUV** 系统若为 macOS 则须授予 **DeepSeek Harness** 权限 。安装与配置参考[前置工作](#前置工作)。
@@ -35,7 +34,7 @@
 - 把重复的 GUI 操作沉淀成**可复用、可检查的命令**（`auv invoke <command-id>`），记录 Run 与 artifact，避免“截图→点击→验证”的 token 消耗循环；流程定型后重复执行几乎不消耗推理 token。
 - 支持 macOS / Linux / Windows；AUV 0.0.43 提供 43 个核心命令，覆盖 display、window、input、accessibility、media、scan。
 
-导航：[前置工作](#前置工作) · [安装](#安装) · [macOS 权限](#macos-权限) · [工具](#工具) · [配置](#配置) · [排障](#排障) · [为什么不用 MCP](#为什么不用-mcp-桥) · [开发](#开发)
+导航：[前置工作](#前置工作) · [安装](#安装) · [macOS 权限](#macos-权限) · [工具](#工具) · [配置](#配置) · [daemon](#daemon-连接方式) · [排障](#排障) · [状态](#状态)
 
 AUV 相关链接：
 
@@ -46,7 +45,7 @@ AUV 相关链接：
 
 ## 安装
 
-插件是构建好的。release 里的 tarball 只包含运行需要的文件（约 330 KB）：`dist/index.mjs`、manifest、插件 patch、locale 和图标。
+插件是构建好的。
 
 在 **设置 → 插件 → 添加插件** 的输入框里填最新 release 的 tarball：
 
@@ -54,9 +53,9 @@ AUV 相关链接：
 https://github.com/liliumneko/dsh-plugin-auv/releases/latest/download/dsh-plugin-auv.tgz
 ```
 
-点安装，然后启用「AUV 桌面自动化」。安装后 9 个 `auv_*` 工具会在下一步模型调用时出现；建议先跑 `auv_doctor`。
+点安装，然后启用「AUV 桌面自动化」。安装后 12 个 `auv_*` 工具会在下一步模型调用时出现；建议先跑 `auv_doctor`。
 
-同一个输入框也接受 npm 包名和本地目录。仓库里不放构建产物，所以填 GitHub 仓库地址装不了；要么用 release tarball，要么 clone 下来自己构建（开发用）。
+同一个输入框也接受 npm 包名和本地目录。仓库里不放构建产物，正常安装请用 release tarball；开发构建和发版流程见 [docs/implementation.md](https://github.com/liliumneko/dsh-plugin-auv/blob/main/docs/implementation.md)。
 
 在会话里也可以用命令，`target` 填同一个链接：
 
@@ -64,17 +63,7 @@ https://github.com/liliumneko/dsh-plugin-auv/releases/latest/download/dsh-plugin
 plugin_manager action=install_bundle target=https://github.com/liliumneko/dsh-plugin-auv/releases/latest/download/dsh-plugin-auv.tgz
 ```
 
-要改代码时：
-
-```sh
-git clone https://github.com/liliumneko/dsh-plugin-auv.git
-cd dsh-plugin-auv
-pnpm install
-pnpm build
-plugin_manager action=install_bundle target=/absolute/path/to/dsh-plugin-auv
-```
-
-本地目录是链接安装，改完源码执行 `pnpm build`、重启 Harness 后生效。禁用：
+禁用插件：
 `plugin_manager action=set_plugin target=dsh-auv enabled=false`。
 
 ## macOS 权限
@@ -89,12 +78,15 @@ plugin_manager action=install_bundle target=/absolute/path/to/dsh-plugin-auv
 | 工具 | 作用 |
 | --- | --- | --- |
 | `auv_doctor` | 权限、daemon 状态与整体就绪情况的诊断；缺东西时给出安装/授权提示，不抛错 |
-| `auv_screenshot` | 截全屏、窗口、应用、显示器或屏幕区域，返回 `.webp` 路径供 `read_image` 查看 |
-| `auv_ocr` | 在屏幕或窗口里找文字；`wait: true` 会轮询等待 |
-| `auv_click` | 点击 OCR 找到的文字，或点击指定坐标；可指定鼠标键、目标和点击区域 |
+| `auv_screenshot` | 截全屏、窗口、应用、显示器或屏幕区域，返回 `.webp` 路径供 `read_image` 查看，同时带回 capture 的 bounds、缩放和像素信息 |
+| `auv_ocr` | 在屏幕或窗口里找文字；`wait: true` 会轮询等待。匹配结果带屏幕坐标、窗口坐标和图片像素坐标 |
+| `auv_click` | 点击 OCR 找到的文字，或点击指定坐标；可指定鼠标键、目标和点击区域，`space: "screen"` 对 Unity/Canvas 更可靠 |
 | `auv_type` | 向当前焦点控件输入或粘贴文字 |
-| `auv_keys` | 按一个组合键，可重复 |
+| `auv_keys` | 按一个组合键，可重复；`policy` 和 `focus` 控制投递方式 |
 | `auv_scroll` | 在窗口内滚动，按窗口内坐标 |
+| `auv_drag` | 从一点拖到另一点，支持屏幕、窗口、显示器坐标，可设鼠标键、时长，并在拖动前聚焦目标 |
+| `auv_capture_state` | 给窗口或区域拍一张内存快照，返回 `state_token`；在操作前调用 |
+| `auv_wait_for_change` | 观察窗口或区域并比较前后画面，返回 `changed` / `no_effect` / `timeout` 和 `changed_ratio`；传 `auv_capture_state` 拿到的 `state_token` 最可靠 |
 | `auv_windows` | 列出窗口的 id、应用 id、标题、位置和状态 |
 | `auv_activate` | 把应用带到前台 |
 
@@ -107,19 +99,45 @@ plugin_manager action=install_bundle target=/absolute/path/to/dsh-plugin-auv
 | `AUV_BIN` | 依次从 `PATH`、`/opt/homebrew/bin`、`/usr/local/bin`、`~/.local/bin`、`~/.cargo/bin` 查找 | `auv` 可执行文件绝对路径；只有插件需要自己启动 daemon 时用得到。无效时会报错并附安装指引 |
 | `AUV_DSH_SDK_STORE_ROOT` | `$DSH_HOME/auv/sdk`（通常 `~/.dsh/auv/sdk`） | 插件自己启动的 daemon 的 store 目录 |
 | `AUV_DSH_CAPTURE_DIR` | `$DSH_HOME/auv/sdk-captures`（通常 `~/.dsh/auv/sdk-captures`） | 截图 `.webp` 的保存目录，供 `read_image` 使用 |
+| `AUV_DSH_CAPTURE_RETENTION_MS` | `3600000`（1 小时） | 每次新截图后，删除超过这个时长的 `.webp`；设为 `0` 表示永久保留 |
+| `AUV_DSH_CAPTURE_MAX_FILES` | `200` | 最多保留多少个截图文件（保留最新的）；设为 `0` 表示不按数量清理 |
 
 查找可连接的 daemon 时会遵循 AUV 自己的 `AUV_ENDPOINT` / `AUV_DISCOVERY_FILE`；`DSH_HOME` 可以改上面的默认数据目录。
 
 ## daemon 连接方式
 
-插件不会主动替换你已经启动的 daemon。
+如果已经有 AUV daemon 在跑，插件直接连上，不会替换它；没有时插件才启动一个自己的 daemon，
+并在 Harness 卸载或重载时停掉。`auv_doctor` 会显示当前是哪种模式、监听在哪里。
 
-- **第一次调用**：先找正在运行的 AUV daemon 并连上去（最多约 2 秒）。找不到时，才自己启动一个私有 `auv serve`：使用自己的 socket 和 launcher token，不写 AUV 的发现文件，Harness 退出时它也跟着退出。只有这种情况才需要 `auv` 可执行文件。
-- **后续调用**：复用同一个连接。daemon 不在了，下次调用会重新连接或重新启动。
-- **卸载或重载插件**：关闭连接。插件自己启动的 daemon 会被停止；你自己启动的 daemon 不受影响。
-- **`auv_doctor`**：会说明当前是连接了已有 daemon，还是用插件自己启动的 daemon，以及它监听的地址。
+## 坐标与验证输入是否生效
 
-截图使用逻辑分辨率（1 像素/屏幕点），最大 2048×2048。SDK 不会为每次调用创建 AUV run，所以工具结果里的 `run_id` 是 `null`，这一点和旧版命令行实现不同。
+工具返回的点都是逻辑屏幕坐标。输入工具接受屏幕、窗口或显示器坐标，具体看每个工具的说明。
+
+结果里带了 capture 信息时，用下面的公式换算：
+
+```
+image_pixel  = (screen_point - bounds.origin) * pixel_ratio
+window_point = screen_point - window.frame.origin
+screen_point = window_point + window.frame.origin
+```
+
+`image_pixel` 属于产生这个结果的这次 capture，不一定等于你之前自己截的那张图；`pixel_ratio`
+是 `pixel_size.width / bounds.width`。截图结果带 `bounds`、`origin`、`scale_factor`、
+`pixel_size`、`coordinate_note`；OCR 匹配结果在 `bounds` 之外还有 `screen_point`、
+`image_pixel`、`window_point`、`pixel_ratio`。
+
+输入工具返回的是“投递证据”，不代表应用真的响应了。验证一次输入：
+
+1. 操作前先调 `auv_capture_state` 给目标窗口或区域拍快照；
+2. 执行 `auv_click` / `auv_drag` / `auv_type` / `auv_keys` / `auv_scroll`；
+3. 用返回的 `state_token` 调 `auv_wait_for_change`。它会比较缩小的 RGBA 画面并返回
+   `changed_ratio`，`min_changed_ratio` 和 `pixel_threshold` 可以过滤鼠标或按钮闪烁。
+
+`baseline_hash` 仍可用，但只做 ThumbHash 粗比较；可靠的做法是 `state_token`。默认
+`min_changed_ratio` 是 0.01，用来忽略鼠标和按钮闪烁；如果是很小的变化（一行日志、一个勾选框），
+可以只截那块区域，或者把 `min_changed_ratio` 调低（例如 0.0005）。`changed: false` 只表示画面
+变化不够大，不代表按键没送达。同一组参数的修改类调用连续第 3 次会被插件拦下，返回
+`no_effect_repeat`；重新截图确认后可以传 `allow_repeat: true` 再发一次。
 
 ## 示例
 
@@ -132,13 +150,11 @@ auv_click { "text": "保存", "application_id": "com.apple.TextEdit" }
 auv_type { "text": "hello", "mode": "paste" }
 auv_keys { "keys": ["cmd", "t"], "repeat": 3, "interval_ms": 120 }
 auv_scroll { "window_id": "<id>", "dy": 600 }
+auv_drag { "from": { "x": 300, "y": 500 }, "to": { "x": 600, "y": 500 }, "duration_ms": 400 }
+auv_capture_state { "window_id": "<id>" }        # 返回 state_token
+auv_drag { "from": { "x": 300, "y": 500 }, "to": { "x": 600, "y": 500 } }
+auv_wait_for_change { "state_token": "<state_token>", "timeout_ms": 3000 }
 ```
-
-## 为什么不用 MCP 桥
-
-AUV 自带 `auv mcp serve`，用 `@deepseek-ai/dsh-mcp-client` 零代码就能接。但这条路线每轮都会把 AUV 完整的 MCP schema 放进上下文：实测 AUV 0.0.43 是 181,539 B（compact 117,422 B，约 29k tokens），其中大部分是单个 `invoke` 工具里内嵌的命令列表。
-
-本插件 9 个工具的 schema 合计 **10,645 B（约 2.7k tokens）**，比 MCP 桥的 compact 版本小约 **11 倍**，而且没有额外的 MCP 进程和握手。bundle 解压后约 1.45 MB（release tarball 约 330 KB），因为带上了 SDK 和 gRPC 客户端；它只加载一次，不占模型上下文。
 
 ## 排障
 
@@ -147,32 +163,16 @@ AUV 自带 `auv mcp serve`，用 `@deepseek-ai/dsh-mcp-client` 零代码就能�
 - **连不上 daemon**：看 `auv_doctor` 里的 endpoint 和错误。插件需要在没有可连接 daemon 时自己启动一个的话，确认 `AUV_DSH_SDK_STORE_ROOT` 可写。插件不会替换或停止你自己启动的 daemon。
 - **权限错误**：按 [macOS 权限](#macos-权限) 授权，重启 Harness 后再跑 `auv_doctor`。
 - **OCR 报 `vision OCR failed …`**：缺屏幕录制，或授权还没生效；授权并重启后重试。这期间可以先用 `auv_screenshot` + `read_image`。
-- **`wait: true` 超时**：SDK 版本是在客户端反复调用 `findText`。文字还在加载时，用更短的 `timeout_ms` 重试比长时间等待更有效。
-- **截图路径读不到**：把返回的绝对路径原样传给 `read_image`。超过 7 天的截图会被清理。
+- **`wait: true` 超时**：文字还在加载时，用更短的 `timeout_ms` 重试，比一次等很久更有效。
+- **截图路径读不到**：把返回的绝对路径原样传给 `read_image`。截图是临时文件：每次新截图后会删掉超过 `AUV_DSH_CAPTURE_RETENTION_MS`（默认 1 小时）或超出 `AUV_DSH_CAPTURE_MAX_FILES`（默认 200）的旧图。需要在更长会话里保留截图，就把这两个值调大。
 
-## 开发
-
-源码是 `index.js` + `src/` 的纯 ESM。运行时产物是单个文件 `dist/index.mjs`，用
-[tsdown](https://tsdown.dev) 打包：9 个工具、SDK 连接和 es-toolkit 辅助函数都在里面，Node 内建模块保持
-external。没有运行时 npm 依赖。`dist/` 不提交，由 GitHub Actions 构建并把打包好的 tarball 传到 release 里。
-
-```sh
-pnpm install
-pnpm build     # 生成 dist/index.mjs
-pnpm check     # 离线自检：工具、manifest、SDK 参数映射、daemon 连接逻辑、bundle
-```
-
-bundle 解压后约 1.45 MB，release tarball 约 330 KB。daemon 的连接与归属逻辑由离线自检覆盖，用的是假的
-transport 依赖，不需要真的起 daemon。
-
-发版：改 `package.json` 里的 `version`，提交后推送同名 tag（`vX.Y.Z`）。GitHub Actions 会安装依赖、构建、
-跑检查、打包，并把 `dsh-plugin-auv-X.Y.Z.tgz` 和 `dsh-plugin-auv.tgz` 传到 release。
+- **按键在 Unity/Canvas 游戏里没反应（Space、Return）**：AUV 会返回 `completed`，但游戏可能忽略这类注入事件（Stacklands 已复现）。改用屏幕坐标点击或 OCR 点击；`changed: false` 只表示画面没变，不代表按键没送达。这是 AUV 上游的驱动限制。
 
 ## 状态
 
-已在 macOS 27.2 + AUV 0.0.43 + DeepSeek Harness 上验证。9 个工具用只读调用测过（doctor、windows、截图 → `read_image`、OCR），两种模式都跑过：连接已有 daemon，以及插件自己启动 daemon。插件自己启动的 daemon 在卸载时会停止；不是自己启动的保持运行。点击、输入、按键、滚动、激活这几个工具验证过参数检查，旧版命令行实现下做过真实输入测试；这一版没有再用真实输入重跑。
-
-历史记录（旧的命令行实现、SDK API 调研）在 [`notes/`](notes/)。
+已在 macOS 27.2 + AUV 0.0.43 + DeepSeek Harness 上验证。拖拽、屏幕坐标点击和画面变化检测在
+Stacklands 实测可用；`auv_keys` 的按键注入仍无法推进那个 Unity 游戏，这是 AUV 上游驱动的问题。
+构建、发版、设计和验证细节在 [docs/implementation.md](https://github.com/liliumneko/dsh-plugin-auv/blob/main/docs/implementation.md)。
 
 ## 版权与许可
 

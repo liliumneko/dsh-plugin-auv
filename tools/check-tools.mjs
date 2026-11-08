@@ -6,7 +6,7 @@
  * present) the built bundle, then asserts that:
  *   - every ToolDefinition is well formed and its JSON Schemas stay inside the
  *     DSH-enforced schema subset;
- *   - the nine auv_* tools exist with the expected parameters, description
+ *   - the twelve auv_* tools exist with the expected parameters, description
  *     limits, timeouts, and `isConcurrencySafe: () => false`;
  *   - the package manifest, locales, patch, icon, and entry point are sane and
  *     the retired CLI/catalog files are gone;
@@ -17,7 +17,7 @@
  *     path, or removed transport env vars;
  *   - `connect({ discover: true })` fails fast when nothing is discoverable;
  *   - tool bodies validate parameters before the transport is touched;
- *   - the bundled dist/index.mjs registers the nine tools and inlines the SDK.
+ *   - the bundled dist/index.mjs registers the twelve tools and inlines the SDK.
  *
  * No AUV daemon is started by this script: safe to run anywhere.
  */
@@ -215,23 +215,60 @@ function assertSupportedSchema(schema, label) {
 }
 
 // ---------------------------------------------------------------------------
-// Expected tool surface (9 SDK-only tools)
+// Expected tool surface (11 SDK-only tools, 0.2.0)
 // ---------------------------------------------------------------------------
 
 const EXPECTED = {
   auv_doctor: { required: [], properties: [] },
   auv_screenshot: { required: [], properties: ['window_id', 'application_id', 'display_id', 'region'] },
   auv_ocr: { required: ['text'], properties: ['text', 'window_id', 'application_id', 'wait', 'timeout_ms'] },
-  auv_click: { required: [], properties: ['text', 'x', 'y', 'window_id', 'application_id', 'display_id', 'button', 'within'] },
-  auv_type: { required: ['text'], properties: ['text', 'mode', 'window_id', 'application_id', 'policy'] },
-  auv_keys: { required: ['keys'], properties: ['keys', 'repeat', 'interval_ms', 'window_id', 'application_id'] },
-  auv_scroll: { required: ['dy'], properties: ['dy', 'dx', 'window_id', 'x', 'y'] },
+  auv_click: {
+    required: [],
+    properties: ['text', 'x', 'y', 'window_id', 'application_id', 'display_id', 'space', 'button', 'within', 'allow_repeat'],
+  },
+  auv_type: { required: ['text'], properties: ['text', 'mode', 'window_id', 'application_id', 'policy', 'allow_repeat'] },
+  auv_keys: {
+    required: ['keys'],
+    properties: ['keys', 'repeat', 'interval_ms', 'window_id', 'application_id', 'policy', 'focus', 'allow_repeat'],
+  },
+  auv_scroll: { required: ['dy'], properties: ['dy', 'dx', 'window_id', 'x', 'y', 'allow_repeat'] },
+  auv_drag: {
+    required: ['from', 'to'],
+    properties: ['from', 'to', 'space', 'window_id', 'application_id', 'display_id', 'button', 'duration_ms', 'activate', 'allow_repeat'],
+  },
+  auv_capture_state: { required: [], properties: ['window_id', 'application_id', 'display_id', 'region'] },
+  auv_wait_for_change: {
+    required: [],
+    properties: [
+      'window_id',
+      'application_id',
+      'display_id',
+      'region',
+      'state_token',
+      'baseline_hash',
+      'timeout_ms',
+      'interval_ms',
+      'min_changed_ratio',
+      'pixel_threshold',
+    ],
+  },
   auv_windows: { required: [], properties: ['include_minimized', 'include_other_desktops'] },
   auv_activate: { required: ['application_id'], properties: ['application_id'] },
 }
 
 const DESCRIPTION_LIMITS = { default: 1_200 }
-const PERMISSION_TOOLS = ['auv_doctor', 'auv_screenshot', 'auv_ocr', 'auv_click', 'auv_type', 'auv_keys', 'auv_scroll']
+const PERMISSION_TOOLS = [
+  'auv_doctor',
+  'auv_screenshot',
+  'auv_ocr',
+  'auv_click',
+  'auv_type',
+  'auv_keys',
+  'auv_scroll',
+  'auv_drag',
+  'auv_capture_state',
+  'auv_wait_for_change',
+]
 
 const RETIRED_FILES = [
   'src/catalog.json',
@@ -302,11 +339,11 @@ async function checkToolDefinitions() {
 
   const tools = createTools()
   assert(Array.isArray(tools), 'createTools() must return an array')
-  assert(tools.length === 9, `expected 9 tools, got ${tools.length}`)
+  assert(tools.length === 12, `expected 12 tools, got ${tools.length}`)
 
   const names = tools.map((tool) => tool?.name)
   assertEqual([...names].sort(), [...TOOL_NAMES].sort(), 'tool names must match TOOL_NAMES')
-  assertEqual([...names].sort(), Object.keys(EXPECTED).sort(), 'tool names must match the 9-tool SDK-only surface')
+  assertEqual([...names].sort(), Object.keys(EXPECTED).sort(), 'tool names must match the 12-tool SDK-only surface')
   assert(new Set(names).size === names.length, 'tool names must be unique')
 
   for (const tool of tools) {
@@ -368,8 +405,8 @@ async function checkEntryPoint() {
     },
   }
   entry.apply(ctx)
-  assert(registered.length === 9, `apply() should register 9 tools, registered ${registered.length}`)
-  assert(new Set(registered.map((definition) => definition.name)).size === 9, 'apply() registered duplicate tool names')
+  assert(registered.length === 12, `apply() should register 12 tools, registered ${registered.length}`)
+  assert(new Set(registered.map((definition) => definition.name)).size === 12, 'apply() registered duplicate tool names')
   assert(disposers.length === 1, `apply() must register one dispose effect, registered ${disposers.length}`)
   assert(typeof disposers[0] === 'function', 'the dispose effect must return a disposer function')
   // The disposer must be safe to call before any SDK transport exists.
@@ -431,6 +468,31 @@ async function checkManifestAndResources() {
 async function checkSdkArgumentMapping() {
   const format = await importSrc('transport/sdk-format.mjs')
 
+  // A change that happened before the call: a provided baseline must be used
+  // as the first comparison instead of capturing a new baseline.
+  const providedChanged = await format.pollForChange({
+    captureSnapshot: async () => 'thumbhash:same',
+    compare: (before, after) => ({ changed: before !== after, ratio: before !== after ? 1 : 0 }),
+    baseline: 'thumbhash:before',
+    timeoutMs: 300,
+    intervalMs: 50,
+  })
+  assertEqual(providedChanged.result, 'changed', 'provided baseline detects a change that already happened')
+  assertEqual(providedChanged.changedRatio, 1, 'provided baseline change ratio')
+  const providedSame = await format.pollForChange({
+    captureSnapshot: async () => 'thumbhash:same',
+    compare: (before, after) => ({ changed: before !== after, ratio: before !== after ? 1 : 0 }),
+    baseline: 'thumbhash:same',
+    timeoutMs: 150,
+    intervalMs: 50,
+  })
+  assertEqual(providedSame.result, 'timeout', 'provided identical baseline times out')
+  await assertRejects(
+    () => format.parseWaitForChangeArgs({ baseline_hash: 'not-a-hash' }),
+    /baseline_hash/,
+    'baseline_hash format is validated',
+  )
+
   // Windows options invert the list flags.
   assertEqual(format.parseWindowsArgs({}), { includeMinimized: false, includeOtherDesktops: false }, 'auv_windows defaults')
   assertEqual(
@@ -464,6 +526,16 @@ async function checkSdkArgumentMapping() {
   await assertRejects(() => format.parseClickArgs({ text: 'OK', button: 'right' }), /button applies only to x\/y/, 'auv_click rejects a non-left button on text clicks')
   await assertRejects(() => format.parseClickArgs({ text: 'OK', display_id: '1' }), /display_id cannot be used with OCR/, 'auv_click rejects display_id with text')
   assertEqual(format.parseClickArgs({ x: 1, y: 2, button: 'right' }).button, 'right', 'auv_click button mapping')
+  // x/y coordinate space (round 2: Unity/Canvas-safe screen clicks).
+  assertEqual(format.parseClickArgs({ x: 1, y: 2 }).space, 'screen', 'auv_click defaults to screen space')
+  assertEqual(format.parseClickArgs({ x: 1, y: 2, window_id: 'w' }).space, 'window', 'auv_click defaults to window space with a window target')
+  assertEqual(format.parseClickArgs({ x: 1, y: 2, application_id: 'a' }).space, 'window', 'auv_click defaults to window space with an application target')
+  assertEqual(format.parseClickArgs({ x: 1, y: 2, display_id: 'd' }).space, 'screen', 'auv_click defaults to screen space with display_id')
+  assertEqual(format.parseClickArgs({ x: 1, y: 2, window_id: 'w', space: 'screen' }).space, 'screen', 'auv_click accepts screen space with a window target')
+  assertEqual(format.parseClickArgs({ x: 1, y: 2, display_id: 'd', space: 'display' }).space, 'display', 'auv_click accepts display space')
+  await assertRejects(() => format.parseClickArgs({ x: 1, y: 2, space: 'window' }), /space: "window" requires/, 'auv_click window space needs a target')
+  await assertRejects(() => format.parseClickArgs({ x: 1, y: 2, space: 'display' }), /space: "display" requires/, 'auv_click display space needs display_id')
+  await assertRejects(() => format.parseClickArgs({ text: 'OK', space: 'screen' }), /space applies only to x\/y/, 'auv_click rejects space with text clicks')
 
   // Type / keys / scroll / activate parity.
   assertEqual(format.parseTypeArgs({ text: 'hi', mode: 'paste', policy: 'background-only' }).mode, 'paste', 'auv_type paste mode')
@@ -535,6 +607,704 @@ async function checkSdkArgumentMapping() {
   const nullRow = format.mapWindowRow(null, '9')
   assertEqual(nullRow.reference.id, '9', 'mapWindowRow tolerates a null window')
   assertEqual(nullRow.application_id, null, 'mapWindowRow maps a missing application id to null')
+}
+
+async function checkDragAndCoordinateMapping() {
+  const format = await importSrc('transport/sdk-format.mjs')
+  const from = { x: 10, y: 20 }
+  const to = { x: 110, y: 70 }
+
+  // Plan defaults and target-based space inference.
+  assertEqual(format.parseDragArgs({ from, to }), {
+    from,
+    to,
+    space: 'screen',
+    windowId: undefined,
+    applicationId: undefined,
+    displayId: undefined,
+    button: 'left',
+    durationMs: 300,
+    activate: false,
+    allowRepeat: false,
+  }, 'auv_drag screen defaults')
+  const windowPlan = format.parseDragArgs({ from, to, window_id: 'w1' })
+  assertEqual(windowPlan.space, 'window', 'a window target infers window space')
+  assertEqual(windowPlan.activate, true, 'a window target activates by default')
+  const displayPlan = format.parseDragArgs({ from, to, display_id: 'd1' })
+  assertEqual(displayPlan.space, 'display', 'display_id infers display space')
+  assertEqual(displayPlan.activate, false, 'display drags do not activate')
+  assertEqual(format.parseDragArgs({ from, to, window_id: 'w1', space: 'screen' }).space, 'screen', 'explicit screen space with a window target')
+  assertEqual(format.parseDragArgs({ from, to, window_id: 'w1', activate: false }).activate, false, 'activate can be turned off')
+  assertEqual(format.parseDragArgs({ from, to, button: 'right', duration_ms: 0 }).durationMs, 0, 'duration 0 is allowed')
+  await assertRejects(() => format.parseDragArgs({}), /Missing required parameter "from"/, 'auv_drag requires from')
+  await assertRejects(() => format.parseDragArgs({ from, to, duration_ms: 30_001 }), /between 0 and 30000/, 'auv_drag duration bounds')
+  await assertRejects(() => format.parseDragArgs({ from, to, window_id: 'w', application_id: 'a' }), /only one of/, 'auv_drag target exclusivity')
+  await assertRejects(() => format.parseDragArgs({ from, to, window_id: 'w', display_id: 'd' }), /not both/, 'auv_drag rejects window+display')
+  await assertRejects(() => format.parseDragArgs({ from, to, space: 'window' }), /requires window_id or application_id/, 'auv_drag window space needs a target')
+  await assertRejects(() => format.parseDragArgs({ from, to, space: 'display' }), /requires display_id/, 'auv_drag display space needs display_id')
+  await assertRejects(() => format.parseDragArgs({ from, to, display_id: 'd', space: 'screen' }), /only valid with space/, 'auv_drag rejects display_id outside display space')
+  await assertRejects(() => format.parseDragArgs({ from: { x: 1 }, to }), /from\.x and from\.y must be finite/, 'auv_drag validates point coordinates')
+
+  // Straight-line drag curve (the AUV CLI's construction).
+  const movement = format.buildDragMovement({ startScreen: { x: 100, y: 200 }, endScreen: { x: 400, y: 350 }, durationMs: 300 })
+  assertEqual(movement.start, { source: { case: 'point', value: { x: 100, y: 200 } } }, 'drag start point')
+  assertEqual(movement.curve.start, { x: 0, y: 0 }, 'drag curve start (required by the Runner)')
+  assertEqual(movement.mapping, { width: 1, height: 1 }, 'drag curve mapping scale 1')
+  assertEqual(movement.curve.segments.length, 1, 'drag has one Bézier segment')
+  assertEqual(movement.curve.segments[0].control1, { x: 100, y: 50 }, 'drag control1')
+  assertEqual(movement.curve.segments[0].control2, { x: 200, y: 100 }, 'drag control2')
+  assertEqual(movement.curve.segments[0].end, { x: 300, y: 150 }, 'drag segment end')
+  assertEqual(movement.options, { duration: 300, sampleRateHz: 60, curveTolerance: 0.5 }, 'drag motion options')
+  assertEqual(Object.hasOwn(movement, 'target'), false, 'drag is delivered to the foreground (no target)')
+
+  // Window/display -> screen conversion.
+  const windowFrame = { x: 100, y: 200, width: 400, height: 300 }
+  const displayFrame = { x: 50, y: 60, width: 1920, height: 1080 }
+  assertEqual(format.screenPointFromWindowPoint({ x: 10, y: 20 }, windowFrame), { x: 110, y: 220 }, 'window point -> screen point')
+  assertEqual(format.windowPointFromScreenPoint({ x: 110, y: 220 }, windowFrame), { x: 10, y: 20 }, 'screen point -> window point')
+  assertEqual(format.screenPointFromDisplayPoint({ x: 8, y: 9 }, displayFrame), { x: 58, y: 69 }, 'display point -> screen point')
+  assertEqual(format.displayPointFromScreenPoint({ x: 58, y: 69 }, displayFrame), { x: 8, y: 9 }, 'screen point -> display point')
+  assertEqual(format.flatRect({ origin: { x: 1, y: 2 }, size: { width: 10, height: 20 } }), { x: 1, y: 2, width: 10, height: 20 }, 'mapped rect -> flat rect')
+  assertEqual(format.flatRect({ x: 1, y: 2, width: 10, height: 20 }), { x: 1, y: 2, width: 10, height: 20 }, 'flat rect passthrough')
+  assertEqual(format.rectCenter({ x: 0, y: 0, width: 10, height: 20 }), { x: 5, y: 10 }, 'rect center')
+  assertEqual(format.normalizePoint({ x: 3, y: 4 }), { x: 3, y: 4 }, 'normalizePoint')
+  assertEqual(format.normalizePoint({ x: 'nope', y: 4 }), null, 'normalizePoint rejects non-finite values')
+
+  // image_pixel = (screen_point - bounds.origin) * pixel_ratio.
+  const capture = { bounds: { x: 100, y: 200, width: 1000, height: 500 }, pixelSize: { width: 2000, height: 1000 }, scaleFactor: 2 }
+  assertEqual(format.capturePixelRatio(capture), 2, 'capture pixel ratio from pixelSize/bounds')
+  assertEqual(format.imagePixelFromScreenPoint({ x: 600, y: 450 }, capture), { x: 1000, y: 500 }, 'screen point -> image pixel')
+  const mappedCapture = { bounds: { origin: { x: 0, y: 0 }, size: { width: 100, height: 50 } }, pixel_dimensions: { width: 100, height: 50 }, scale_factor: 1 }
+  assertEqual(format.imagePixelFromScreenPoint({ x: 10, y: 5 }, mappedCapture), { x: 10, y: 5 }, 'image pixel from the mapped capture shape')
+  const enriched = format.enrichTextMatches(
+    [{ text: 'OK', confidence: 1, bounds: { origin: { x: 110, y: 220 }, size: { width: 20, height: 10 } } }],
+    capture,
+    windowFrame,
+  )
+  assertEqual(enriched[0].screen_point, { x: 120, y: 225 }, 'enriched match screen point')
+  assertEqual(enriched[0].image_pixel, { x: 40, y: 50 }, 'enriched match image pixel')
+  assertEqual(enriched[0].window_point, { x: 20, y: 25 }, 'enriched match window point')
+  assertEqual(enriched[0].scale_factor, 2, 'enriched match scale factor')
+  assertEqual(enriched[0].pixel_ratio, 2, 'enriched match pixel ratio')
+  assertEqual(enriched[0].bounds, { origin: { x: 110, y: 220 }, size: { width: 20, height: 10 } }, 'enriched match keeps bounds')
+  assertEqual(format.enrichTextMatches([], null, null), [], 'enrichTextMatches empty input')
+}
+
+async function checkDragRequestThroughSdkMock() {
+  const { InputService, connect, createAuv, createMockTransport } = await import('@auv-js/sdk/node')
+  const format = await importSrc('transport/sdk-format.mjs')
+
+  // The real SDK method wrapper + generated Protobuf schema, answered by an
+  // in-memory mock transport: no daemon and no real input is involved.
+  let received = null
+  const transport = createMockTransport(({ service }) => {
+    service(InputService, {
+      dragMouse: (request) => {
+        received = request
+        return { point: { x: 460, y: 310 }, action: { verified: true } }
+      },
+    })
+  })
+  const connection = await connect({ transport })
+  try {
+    const auv = createAuv(connection)
+    const runner = auv.runner({ runnerClass: 'auv.core.local' })
+    const movement = format.buildDragMovement({ startScreen: { x: 100, y: 200 }, endScreen: { x: 400, y: 350 }, durationMs: 300 })
+    const response = await runner.input.dragMouse({ movement, button: format.MOUSE_BUTTON_VALUES.left })
+    assert(received !== null, 'the mock input service did not receive a DragMouse request')
+    assertEqual(received.$typeName, 'auv.api.driver.v1.DragMouseRequest', 'the SDK serialized a DragMouseRequest')
+    assertEqual(received.button, 1, 'the SDK serialized the left mouse button')
+    assertEqual(received.movement.start.source.case, 'point', 'the drag start is a screen point')
+    assertEqual(
+      { x: received.movement.start.source.value.x, y: received.movement.start.source.value.y },
+      { x: 100, y: 200 },
+      'the SDK serialized the drag start point',
+    )
+    assertEqual(received.movement.curve.segments.length, 1, 'the SDK serialized one Bézier segment')
+    const segment = received.movement.curve.segments[0]
+    assertEqual(
+      { control1: { x: segment.control1.x, y: segment.control1.y }, control2: { x: segment.control2.x, y: segment.control2.y }, end: { x: segment.end.x, y: segment.end.y } },
+      { control1: { x: 100, y: 50 }, control2: { x: 200, y: 100 }, end: { x: 300, y: 150 } },
+      'the SDK serialized the straight-line Bézier curve',
+    )
+    assertEqual(received.movement.options.sampleRateHz, 60, 'the SDK serialized sampleRateHz')
+    assertEqual(received.movement.options.curveTolerance, 0.5, 'the SDK serialized curveTolerance')
+    assertEqual(Number(received.movement.options.duration.seconds), 0, 'the SDK converted duration ms -> Duration seconds')
+    assertEqual(Number(received.movement.options.duration.nanos), 300_000_000, 'the SDK converted duration ms -> Duration nanos')
+    assertEqual(received.movement.target, undefined, 'the drag has no target (foreground delivery)')
+    assertEqual(Number(response.point.x), 460, 'the mock drag response is normalized back')
+  } finally {
+    await connection.close()
+  }
+}
+
+async function checkWaitForChangeLogic() {
+  const format = await importSrc('transport/sdk-format.mjs')
+
+  // Plan defaults/validation.
+  const waitPlan = format.parseWaitForChangeArgs({})
+  assertEqual(
+    {
+      timeoutMs: waitPlan.timeoutMs,
+      intervalMs: waitPlan.intervalMs,
+      windowId: waitPlan.windowId,
+      region: waitPlan.region,
+      stateToken: waitPlan.stateToken,
+      baselineHash: waitPlan.baselineHash,
+      minChangedRatio: waitPlan.minChangedRatio,
+      pixelThreshold: waitPlan.pixelThreshold,
+    },
+    {
+      timeoutMs: 5_000,
+      intervalMs: 200,
+      windowId: undefined,
+      region: undefined,
+      stateToken: undefined,
+      baselineHash: undefined,
+      minChangedRatio: 0.01,
+      pixelThreshold: 24,
+    },
+    'auv_wait_for_change defaults',
+  )
+  assertEqual(format.parseWaitForChangeArgs({ window_id: 'w1', timeout_ms: 100, interval_ms: 50 }).timeoutMs, 100, 'wait timeout parsing')
+  assertEqual(format.parseWaitForChangeArgs({ display_id: 'd1', region: { x: 0, y: 0, width: 10, height: 10 } }).displayId, 'd1', 'wait allows region on a display')
+  const tuned = format.parseWaitForChangeArgs({ state_token: 'tok', min_changed_ratio: 0.5, pixel_threshold: 40 })
+  assertEqual(tuned.stateToken, 'tok', 'wait state_token parsing')
+  assertEqual(tuned.minChangedRatio, 0.5, 'wait min_changed_ratio parsing')
+  assertEqual(tuned.pixelThreshold, 40, 'wait pixel_threshold parsing')
+  await assertRejects(() => format.parseWaitForChangeArgs({ timeout_ms: 50 }), /between 100 and 120000/, 'wait timeout lower bound')
+  await assertRejects(() => format.parseWaitForChangeArgs({ timeout_ms: 120_001 }), /between 100 and 120000/, 'wait timeout upper bound')
+  await assertRejects(() => format.parseWaitForChangeArgs({ interval_ms: 10 }), /between 50 and 5000/, 'wait interval lower bound')
+  await assertRejects(() => format.parseWaitForChangeArgs({ interval_ms: 5_001 }), /between 50 and 5000/, 'wait interval upper bound')
+  await assertRejects(() => format.parseWaitForChangeArgs({ min_changed_ratio: -0.1 }), /between 0 and 1/, 'wait min_changed_ratio lower bound')
+  await assertRejects(() => format.parseWaitForChangeArgs({ min_changed_ratio: 1.1 }), /between 0 and 1/, 'wait min_changed_ratio upper bound')
+  await assertRejects(() => format.parseWaitForChangeArgs({ pixel_threshold: -1 }), /between 0 and 255/, 'wait pixel_threshold lower bound')
+  await assertRejects(() => format.parseWaitForChangeArgs({ pixel_threshold: 256 }), /between 0 and 255/, 'wait pixel_threshold upper bound')
+  await assertRejects(() => format.parseWaitForChangeArgs({ pixel_threshold: 1.5 }), /must be an integer/, 'wait pixel_threshold must be an integer')
+  await assertRejects(() => format.parseWaitForChangeArgs({ window_id: 'w', application_id: 'a' }), /only one of/, 'wait target exclusivity')
+  await assertRejects(
+    () => format.parseWaitForChangeArgs({ window_id: 'w', region: { x: 0, y: 0, width: 10, height: 10 } }),
+    /region is only supported/,
+    'wait rejects a region with a window target',
+  )
+
+  // ThumbHash helpers.
+  assertEqual(format.thumbhashOf({ thumbhash: new Uint8Array([0xde, 0xad, 0xbe, 0xef]) }), 'thumbhash:deadbeef', 'ThumbHash hex')
+  assertEqual(format.thumbhashOf({ thumbhash: new Uint8Array() }), null, 'an empty ThumbHash is absent')
+  assertEqual(format.thumbhashOf({}), null, 'a missing ThumbHash is absent')
+
+  // Fake clock + fake snapshot sequence: change after two identical snapshots.
+  let clock = 1_000
+  const sleep = async (ms) => {
+    clock += ms
+  }
+  const changedSeq = ['aa', 'aa', 'bb']
+  let changedIndex = 0
+  const changed = await format.pollForChange({
+    captureSnapshot: async () => changedSeq[Math.min(changedIndex++, changedSeq.length - 1)],
+    compare: (before, after) => ({ changed: before !== after, ratio: before !== after ? 1 : 0 }),
+    intervalMs: 100,
+    timeoutMs: 1_000,
+    now: () => clock,
+    sleep,
+  })
+  assertEqual(changed.result, 'changed', 'poll detects a changed snapshot')
+  assertEqual(changed.changed, true, 'poll changed flag')
+  assertEqual(changed.elapsedMs, 200, 'poll change elapsed')
+  assertEqual(changed.before, 'aa', 'poll before snapshot')
+  assertEqual(changed.after, 'bb', 'poll after snapshot')
+  assertEqual(changed.changedRatio, 1, 'poll change ratio')
+
+  // Constant snapshots run into the timeout.
+  clock = 0
+  const timedOut = await format.pollForChange({
+    captureSnapshot: async () => 'aa',
+    compare: (before, after) => ({ changed: before !== after, ratio: before !== after ? 1 : 0 }),
+    intervalMs: 100,
+    timeoutMs: 250,
+    now: () => clock,
+    sleep,
+  })
+  assertEqual(timedOut.result, 'timeout', 'poll times out without a change')
+  assertEqual(timedOut.changed, false, 'poll timeout changed flag')
+  assertEqual(timedOut.elapsedMs, 250, 'poll timeout elapsed')
+
+  // Aborting before the deadline stops early without a change.
+  clock = 0
+  const controller = new AbortController()
+  const aborted = await format.pollForChange({
+    captureSnapshot: async () => 'aa',
+    compare: (before, after) => ({ changed: before !== after, ratio: before !== after ? 1 : 0 }),
+    intervalMs: 100,
+    timeoutMs: 1_000,
+    signal: controller.signal,
+    now: () => clock,
+    sleep: async (ms) => {
+      clock += ms
+      if (clock >= 200) controller.abort()
+    },
+  })
+  assertEqual(aborted.result, 'no_effect', 'an aborted poll reports no_effect')
+  assertEqual(aborted.changed, false, 'an aborted poll is not a change')
+}
+
+async function checkPixelDiffAndStateStore() {
+  const format = await importSrc('transport/sdk-format.mjs')
+
+  const makeFrame = (width, height, mutate) => {
+    const data = new Uint8Array(width * height * 4)
+    for (let index = 0; index < data.length; index += 4) {
+      data[index] = 10
+      data[index + 1] = 20
+      data[index + 2] = 30
+      data[index + 3] = 255
+    }
+    if (typeof mutate === 'function') mutate(data)
+    return { width, height, data }
+  }
+
+  // Pixel-diff ratio and per-channel threshold.
+  const base = makeFrame(10, 10)
+  assertEqual(format.compareRgbaFrames(base, makeFrame(10, 10), 24), {
+    changedRatio: 0,
+    differingPixels: 0,
+    comparedPixels: 100,
+    dimensionMismatch: false,
+  }, 'identical RGBA frames have ratio 0')
+  const oneNoise = makeFrame(10, 10, (data) => {
+    data[0] = 34 // exactly threshold above 10: not greater than 24
+  })
+  assertEqual(format.compareRgbaFrames(base, oneNoise, 24).differingPixels, 0, 'a change equal to pixel_threshold is ignored')
+  const oneAbove = makeFrame(10, 10, (data) => {
+    data[0] = 35 // 25 above 10: greater than 24
+  })
+  assertEqual(format.compareRgbaFrames(base, oneAbove, 24).differingPixels, 1, 'a change above pixel_threshold counts')
+  assertEqual(format.compareRgbaFrames(base, oneAbove, 24).changedRatio, 0.01, 'pixel ratio counts changed pixels over total')
+  const manyAbove = makeFrame(10, 10, (data) => {
+    for (let index = 0; index < 40; index += 4) data[index] = 255
+  })
+  assertEqual(format.compareRgbaFrames(base, manyAbove, 24).changedRatio, 0.1, '10 of 100 pixels changed -> 0.1')
+  const alphaOnly = makeFrame(10, 10, (data) => {
+    for (let index = 0; index < data.length; index += 4) data[index + 3] = 0
+  })
+  assertEqual(format.compareRgbaFrames(base, alphaOnly, 0).changedRatio, 0, 'alpha changes are ignored')
+  const resized = makeFrame(5, 5)
+  assertEqual(format.compareRgbaFrames(base, resized, 24), {
+    changedRatio: 1,
+    differingPixels: 100,
+    comparedPixels: 100,
+    dimensionMismatch: true,
+  }, 'a dimension change counts as fully changed')
+  await assertRejects(() => format.compareRgbaFrames({ width: 0, height: 10, data: new Uint8Array() }, base, 24), /positive integer/, 'compareRgbaFrames validates dimensions')
+  await assertRejects(() => format.compareRgbaFrames({ width: 10, height: 10, data: new Uint8Array(4) }, base, 24), /shorter than/, 'compareRgbaFrames validates pixel data length')
+
+  // Threshold gating.
+  assertEqual(format.frameChanged({ changedRatio: 0 }, 0.01), false, 'ratio 0 is never a change')
+  assertEqual(format.frameChanged({ changedRatio: 0.005 }, 0.01), false, 'ratio below min_changed_ratio is not a change')
+  assertEqual(format.frameChanged({ changedRatio: 0.01 }, 0.01), true, 'ratio equal to min_changed_ratio is a change')
+  assertEqual(format.frameChanged({ changedRatio: 0.0001 }, 0), true, 'min_changed_ratio 0 means any non-zero change')
+  assertEqual(format.frameChanged({ changedRatio: 1 }, 0.5), true, 'ratio above min_changed_ratio is a change')
+
+  // LRU + TTL capture-state store.
+  let clock = 1_000
+  const store = format.createCaptureStateStore({ maxEntries: 3, ttlMs: 1_000, now: () => clock })
+  store.put('a', { width: 1 })
+  store.put('b', { width: 2 })
+  store.put('c', { width: 3 })
+  assertEqual(store.size, 3, 'store tracks entries')
+  assertEqual(store.get('a'), { width: 1 }, 'store returns values')
+  clock = 1_500
+  store.get('a') // touch: a is now most recently used
+  store.put('d', { width: 4 })
+  assertEqual(store.size, 3, 'store evicts above maxEntries')
+  assertEqual(store.get('b'), null, 'LRU evicts the least recently used entry')
+  assert(store.get('a') !== null, 'a touched entry survives')
+  clock = 2_600
+  assertEqual(store.get('a'), null, 'store expires entries past the TTL')
+  assertEqual(store.size, 2, 'expired entry is removed')
+  store.clear()
+  assertEqual(store.size, 0, 'store clears')
+  await assertRejects(() => store.put('', {}), /non-empty string/, 'store validates tokens')
+
+  // Target identity helpers used by the state store/diagnostics.
+  assertEqual(format.captureTargetKey({ window_id: 'w1' }), 'window:w1', 'target key window')
+  assertEqual(format.captureTargetKey({ application_id: 'com.x' }), 'app:com.x', 'target key app')
+  assertEqual(format.captureTargetKey({ display_id: 'd1' }), 'display:d1', 'target key display')
+  assertEqual(format.captureTargetKey({ region: { x: 1, y: 2, width: 3, height: 4 } }), 'region:1,2,3,4', 'target key region')
+  assertEqual(format.captureTargetKey({}), 'screen', 'target key screen')
+  assertEqual(
+    format.captureTargetPlan({ window_id: 'w1', region: { x: 1, y: 2, width: 3, height: 4 } }),
+    { windowId: 'w1', applicationId: undefined, displayId: undefined, region: { x: 1, y: 2, width: 3, height: 4 } },
+    'captureTargetPlan copies the target',
+  )
+}
+
+async function checkKeysPlanning() {
+  const format = await importSrc('transport/sdk-format.mjs')
+
+  const plain = format.parseKeysArgs({ keys: ['cmd', 'l'] })
+  assertEqual(plain.focus, false, 'keys focus defaults to false without a target')
+  assertEqual(plain.policy, undefined, 'keys policy is unset by default')
+  assertEqual(format.planKeysDelivery(plain), {
+    targeted: false,
+    effectivePolicy: 'foreground-preferred',
+    focus: false,
+    focusTarget: null,
+    deliveryVia: 'foreground',
+  }, 'foreground keys planning')
+
+  const targeted = format.parseKeysArgs({ keys: ['cmd', 'l'], window_id: 'w1', policy: 'background-preferred', focus: false })
+  assertEqual(targeted.focus, false, 'focus can be turned off for a target')
+  assertEqual(
+    format.planKeysDelivery(targeted),
+    { targeted: true, effectivePolicy: 'background-preferred', focus: false, focusTarget: null, deliveryVia: 'window' },
+    'targeted background keys planning',
+  )
+  const defaultFocus = format.parseKeysArgs({ keys: ['cmd', 'l'], application_id: 'com.x' })
+  assertEqual(defaultFocus.focus, true, 'focus defaults to true with an application target')
+  assertEqual(
+    format.planKeysDelivery(defaultFocus),
+    { targeted: true, effectivePolicy: 'foreground-preferred', focus: true, focusTarget: 'application', deliveryVia: 'foreground' },
+    'targeted foreground keys planning',
+  )
+  const windowFocus = format.parseKeysArgs({ keys: ['cmd', 'l'], window_id: 'w1' })
+  assertEqual(format.planKeysDelivery(windowFocus).focusTarget, 'window', 'window focus target')
+
+  await assertRejects(() => format.parseKeysArgs({ keys: ['a'], policy: 'background-only' }), /requires a window_id or application_id target/, 'background policy without a target')
+  await assertRejects(() => format.parseKeysArgs({ keys: ['a'], focus: true }), /requires a window_id or application_id target/, 'focus without a target')
+  await assertRejects(() => format.parseKeysArgs({ keys: ['a'], focus: 'yes' }), /must be a boolean/, 'focus must be a boolean')
+  await assertRejects(() => format.parseKeysArgs({ keys: ['a'], window_id: 'w', application_id: 'a' }), /only one of/, 'keys target exclusivity')
+}
+
+async function checkRepeatGuard() {
+  const format = await importSrc('transport/sdk-format.mjs')
+  const { createTools } = await importSrc('tools.mjs')
+  const t0 = 1_700_000_000_000
+
+  // Canonical identities: key order and allow_repeat do not matter.
+  assertEqual(format.repeatGuardKey('t', { b: 1, a: 2 }), format.repeatGuardKey('t', { a: 2, b: 1 }), 'repeat guard key ignores argument order')
+  assertEqual(format.repeatGuardKey('t', { a: 1 }), format.repeatGuardKey('t', { a: 1, allow_repeat: true }), 'repeat guard key ignores allow_repeat')
+  assertEqual(format.repeatGuardKey('t', { a: 1 }), format.repeatGuardKey('t', { a: 1, allowRepeat: true }), 'repeat guard key ignores the parsed allowRepeat field')
+  assertEqual(format.repeatGuardKey('t', { a: [1, 2] }), 't:{"a":[1,2]}', 'repeat guard canonical JSON shape')
+
+  // Third identical call inside the window is blocked; the fourth stays blocked.
+  const guard = format.createRepeatGuard()
+  assertEqual(guard.check('auv_click', { x: 1, y: 2 }, t0).blocked, false, 'repeat guard first call')
+  assertEqual(guard.check('auv_click', { x: 1, y: 2 }, t0 + 100).blocked, false, 'repeat guard second call')
+  const third = guard.check('auv_click', { x: 1, y: 2 }, t0 + 200)
+  assertEqual(third.blocked, true, 'repeat guard third call is blocked')
+  assertEqual(third.repeatCount, 3, 'repeat guard blocked count')
+  assert(third.message.includes('allow_repeat'), 'repeat guard message explains the override')
+  assertEqual(guard.check('auv_click', { x: 1, y: 2 }, t0 + 300).blocked, true, 'repeat guard stays blocked')
+  guard.bypass()
+  assertEqual(guard.check('auv_click', { x: 1, y: 2 }, t0 + 400).blocked, false, 'repeat guard bypass clears the state')
+
+  // A different call resets the counter.
+  const other = format.createRepeatGuard()
+  other.check('auv_click', { x: 1, y: 2 }, t0)
+  other.check('auv_click', { x: 1, y: 2 }, t0 + 100)
+  assertEqual(other.check('auv_type', { text: 'a' }, t0 + 200).blocked, false, 'a different call is not blocked')
+  assertEqual(other.check('auv_click', { x: 1, y: 2 }, t0 + 300).blocked, false, 'a different call resets the count')
+
+  // The window expires.
+  const expired = format.createRepeatGuard()
+  expired.check('auv_scroll', { dy: 5 }, t0)
+  expired.check('auv_scroll', { dy: 5 }, t0 + 1_000)
+  assertEqual(expired.check('auv_scroll', { dy: 5 }, t0 + 31_001).blocked, false, 'the repeat window expires after 30 s')
+
+  assertEqual(format.REPEAT_GUARD_WINDOW_MS, 30_000, 'repeat guard window is 30 s')
+  assertEqual(format.REPEAT_GUARD_LIMIT, 3, 'repeat guard limit is 3')
+  assert(format.REPEAT_GUARD_MESSAGE.includes('allow_repeat:true'), 'repeat guard message documents the override')
+
+  // The tools render a blocked value without touching the transport.
+  const clickTool = createTools().find((tool) => tool.name === 'auv_click')
+  assert(clickTool !== undefined, 'auv_click must exist')
+  const rendered = clickTool.output.render({}, { status: 'no_effect_repeat', message: 'blocked for the check' })
+  assert(Array.isArray(rendered) && rendered[0].text.includes('blocked for the check'), 'a blocked click renders the repeat message')
+  const dragTool = createTools().find((tool) => tool.name === 'auv_drag')
+  assert(dragTool !== undefined, 'auv_drag must exist')
+  assert(dragTool.description.includes('allow_repeat'), 'auv_drag documents the repeat override')
+}
+
+async function checkDragKeysWaitWithFakeRunner() {
+  const format = await importSrc('transport/sdk-format.mjs')
+  const sdk = await importSrc('transport/sdk.mjs')
+  const exec = { signal: new AbortController().signal }
+  const calls = []
+  const windowFrame = { x: 100, y: 200, width: 400, height: 300 }
+  const displayFrame = { x: 50, y: 60, width: 1920, height: 1080 }
+  const window = { ref: { windowId: 'w1' }, title: 'Fake', applicationId: 'com.fake', frame: windowFrame, isMain: true, isVisible: true, state: {} }
+  const display = { displayId: 'd1', name: 'Fake Display', frame: displayFrame, scaleFactor: 2, primary: true, builtin: true }
+
+  // Fake captures: `captureQueue` supplies CapturedFrames, `imageQueue` supplies
+  // downscaled RGBA images consumed by auv_capture_state / auv_wait_for_change.
+  let captureQueue = []
+  let imageQueue = []
+  const makeRgbaFrame = (mutate) => {
+    const width = 8
+    const height = 8
+    const data = new Uint8Array(width * height * 4)
+    for (let index = 0; index < data.length; index += 4) {
+      data[index] = 10
+      data[index + 1] = 20
+      data[index + 2] = 30
+      data[index + 3] = 255
+    }
+    if (typeof mutate === 'function') mutate(data)
+    return { width, height, data }
+  }
+  const unchangedImage = makeRgbaFrame()
+  const changedImage = makeRgbaFrame((data) => {
+    for (let index = 0; index < data.length; index += 4) {
+      data[index] = 255
+      data[index + 1] = 255
+      data[index + 2] = 255
+    }
+  })
+  const tinyChangeImage = makeRgbaFrame((data) => {
+    data[0] = 35 // 1 of 64 pixels differs by more than the default threshold
+  })
+  const fallbackCapture = { bounds: windowFrame, scaleFactor: 1, thumbhash: new Uint8Array([0xaa]) }
+  const windowClient = {
+    id: 'w1',
+    window,
+    setFocus: async () => {
+      calls.push(['window.setFocus'])
+      return { path: 'normal' }
+    },
+    refresh: async () => {
+      calls.push(['window.refresh'])
+      return window
+    },
+    pressKeys: async (keys, options) => {
+      calls.push(['window.pressKeys', keys, options])
+      return { verified: true }
+    },
+    click: async () => {
+      calls.push(['window.click'])
+      return { screenPoint: { x: 110, y: 220 }, windowPoint: { x: 10, y: 20 }, action: { verified: true } }
+    },
+    capture: async () => {
+      const capture = captureQueue.length > 0 ? captureQueue.shift() : fallbackCapture
+      calls.push(['window.capture'])
+      return { window, capture }
+    },
+  }
+  const runner = {
+    windows: {
+      get: async (id) => {
+        calls.push(['windows.get', id])
+        return windowClient
+      },
+      resolve: async () => windowClient,
+    },
+    applications: {
+      activate: async (request) => {
+        calls.push(['applications.activate', request])
+        return { requestedApplicationId: request.applicationId, verification: { verification: { case: 'unavailable', value: { reason: 'fake' } } } }
+      },
+    },
+    displays: {
+      list: async () => [display],
+      capture: async () => ({ display, capture: fallbackCapture }),
+      captureRegion: async () => ({ display, capture: fallbackCapture }),
+    },
+    input: {
+      dragMouse: async (request) => {
+        calls.push(['input.dragMouse', request])
+        return { point: { x: 210, y: 270 }, action: { verified: true } }
+      },
+      pressKeys: async (request) => {
+        calls.push(['input.pressKeys', request])
+        return { actions: [] }
+      },
+      click: async (target, options) => {
+        calls.push(['input.click', target, options])
+        const space = target?.coordinateSpace?.case
+        const screenPoint = space === 'screen' ? { x: target.x, y: target.y } : { x: target.x + displayFrame.x, y: target.y + displayFrame.y }
+        return { screenPoint, action: { verified: true } }
+      },
+    },
+    captures: {
+      image: async () => {
+        calls.push(['captures.image'])
+        const image = imageQueue.length > 0 ? imageQueue.shift() : unchangedImage
+        return { data: image.data, width: image.width, height: image.height, encoding: 4 }
+      },
+    },
+  }
+
+  const deps = {
+    connect: async (options) => {
+      calls.push(['connect', options])
+      return { close: async () => calls.push(['close']) }
+    },
+    createAuv: () => ({
+      health: { check: async () => ({ id: 'fake-daemon', status: 'serving' }) },
+      runner: () => runner,
+    }),
+    startAuv: async () => {
+      throw new Error('startAuv must not be called when the fake daemon is attached')
+    },
+    discoverEndpoint: async () => ({ endpoint: 'unix:///fake.sock', local: true, transport: 'unix' }),
+    resolveBinary: () => '/fake/auv',
+  }
+
+  const state = sdk.createSdkTransportState()
+  try {
+    sdk.resetCaptureStateStore()
+    const facade = await sdk.initializeSdkTransport(state, deps)
+    assertEqual(facade.mode, 'attached', 'the fake transport attaches')
+
+    // Window-space drag: points are converted with the window frame and focus
+    // happens before the drag (activation matters for real macOS drags).
+    calls.length = 0
+    const windowDrag = format.parseDragArgs({ from: { x: 10, y: 20 }, to: { x: 110, y: 70 }, window_id: 'w1' })
+    const dragValue = await facade.drag(windowDrag, exec, 120_000)
+    const dragCall = calls.find((entry) => entry[0] === 'input.dragMouse')
+    assert(dragCall !== undefined, 'the fake runner received a dragMouse call')
+    assertEqual(dragCall[1].movement.start.source.value, { x: 110, y: 220 }, 'window drag start converted to screen')
+    assertEqual(dragCall[1].movement.curve.segments[0].end, { x: 100, y: 50 }, 'window drag displacement')
+    assertEqual(dragCall[1].movement.options, { duration: 300, sampleRateHz: 60, curveTolerance: 0.5 }, 'window drag motion options')
+    assertEqual(dragCall[1].button, 1, 'left button maps to MouseButton.LEFT')
+    assert(calls.findIndex((entry) => entry[0] === 'window.setFocus') < calls.findIndex((entry) => entry[0] === 'input.dragMouse'), 'the window is focused before the drag')
+    assertEqual(dragValue.command_id, 'input.dragMouse', 'drag command id')
+    assertEqual(dragValue.screen_start, { x: 110, y: 220 }, 'drag result screen_start')
+    assertEqual(dragValue.screen_end, { x: 210, y: 270 }, 'drag result screen_end')
+    assertEqual(dragValue.window_point, { x: 10, y: 20 }, 'drag result window_point')
+    assertEqual(dragValue.window_end, { x: 110, y: 70 }, 'drag result window_end')
+
+    // Display-space drag: converted with the display frame, no activation.
+    calls.length = 0
+    const displayDrag = format.parseDragArgs({ from: { x: 8, y: 9 }, to: { x: 108, y: 59 }, display_id: 'd1' })
+    const displayValue = await facade.drag(displayDrag, exec, 120_000)
+    const displayDragCall = calls.find((entry) => entry[0] === 'input.dragMouse')
+    assertEqual(displayDragCall[1].movement.start.source.value, { x: 58, y: 69 }, 'display drag start converted to screen')
+    assertEqual(displayDragCall[1].movement.curve.segments[0].end, { x: 100, y: 50 }, 'display drag displacement')
+    assertEqual(displayValue.display_start, { x: 8, y: 9 }, 'drag result display_start')
+    assertEqual(displayValue.window_point, null, 'display drags have no window point')
+
+    // auv_keys with a window target: focus first, then deliver with the policy.
+    calls.length = 0
+    const targetedKeys = format.parseKeysArgs({ keys: ['cmd', 'l'], window_id: 'w1', policy: 'background-preferred' })
+    const keysValue = await facade.keys(targetedKeys, exec, 120_000)
+    const pressCall = calls.find((entry) => entry[0] === 'window.pressKeys')
+    assert(pressCall !== undefined, 'the fake runner received the targeted pressKeys call')
+    assertEqual(pressCall[1], ['cmd', 'l'], 'keys pass through')
+    assertEqual(pressCall[2].policy, 2, 'background-preferred maps to InputPolicy 2')
+    assert(calls.findIndex((entry) => entry[0] === 'window.setFocus') < calls.findIndex((entry) => entry[0] === 'window.pressKeys'), 'keys focus before delivery')
+    assertEqual(keysValue.policy, 'background-preferred', 'keys result policy')
+    assertEqual(keysValue.focus, true, 'keys result focus flag')
+
+    // auv_keys without a target: foreground press with foreground-preferred.
+    calls.length = 0
+    const foregroundKeys = format.parseKeysArgs({ keys: ['return'] })
+    const foregroundValue = await facade.keys(foregroundKeys, exec, 120_000)
+    const foregroundPress = calls.find((entry) => entry[0] === 'input.pressKeys')
+    assert(foregroundPress !== undefined, 'the fake runner received the foreground pressKeys call')
+    assertEqual(foregroundPress[1].target, { recipient: { case: 'foreground', value: true } }, 'foreground key recipient')
+    assertEqual(foregroundPress[1].policy, 3, 'foreground-preferred policy for foreground keys')
+    assertEqual(foregroundValue.focus, false, 'foreground keys do not focus a target')
+    assert(/delivery only/.test(foregroundValue.warnings.join(' ')), 'keys warns that delivery is not proof of an effect')
+
+    // auv_wait_for_change (captured baseline): pixel comparison detects a
+    // changed frame and ignores an unchanged one.
+    calls.length = 0
+    captureQueue = [fallbackCapture, fallbackCapture]
+    imageQueue = [unchangedImage, changedImage]
+    const changedPlan = format.parseWaitForChangeArgs({ window_id: 'w1', timeout_ms: 500, interval_ms: 50 })
+    const changedValue = await facade.waitForChange(changedPlan, exec, 120_000)
+    assertEqual(changedValue.result, 'changed', 'wait_for_change sees the changed fake pixels')
+    assertEqual(changedValue.changed, true, 'wait_for_change changed flag')
+    assertEqual(changedValue.mode, 'window', 'wait_for_change window mode')
+    assertEqual(changedValue.baseline_source, 'captured', 'wait_for_change captured baseline source')
+    assertEqual(changedValue.comparison, 'pixels', 'wait_for_change compares pixels')
+    assertEqual(changedValue.changed_ratio, 1, 'wait_for_change full-frame ratio')
+    assertEqual(changedValue.min_changed_ratio, 0.01, 'wait_for_change default min ratio')
+    assertEqual(changedValue.pixel_threshold, 24, 'wait_for_change default pixel threshold')
+    assertEqual(changedValue.artifact_path, null, 'wait_for_change writes no artifact')
+
+    // Timeout case: identical pixels never reach min_changed_ratio.
+    calls.length = 0
+    captureQueue = []
+    imageQueue = []
+    const timeoutPlan = format.parseWaitForChangeArgs({ window_id: 'w1', timeout_ms: 100, interval_ms: 50 })
+    const timeoutValue = await facade.waitForChange(timeoutPlan, exec, 120_000)
+    assertEqual(timeoutValue.result, 'timeout', 'wait_for_change times out on unchanged pixels')
+    assertEqual(timeoutValue.changed, false, 'wait_for_change timeout changed flag')
+    assertEqual(timeoutValue.changed_ratio, 0, 'wait_for_change timeout ratio')
+    assert(timeoutValue.elapsed_ms >= 100, 'wait_for_change reports elapsed time')
+    assert(timeoutValue.artifact_path === null, 'the timeout path writes no artifact')
+
+    // auv_capture_state stores an in-memory snapshot; wait can use its token.
+    calls.length = 0
+    imageQueue = [unchangedImage]
+    const captureValue = await facade.captureState(format.parseCaptureStateArgs({ window_id: 'w1' }), exec, 120_000)
+    assert(typeof captureValue.state_token === 'string' && captureValue.state_token.length > 10, 'capture_state returns a token')
+    assertEqual(captureValue.command_id, 'frame.captureState', 'capture_state command id')
+    assertEqual(captureValue.hash, 'thumbhash:aa', 'capture_state stores the ThumbHash')
+    assertEqual(captureValue.width, 8, 'capture_state width')
+    assertEqual(captureValue.height, 8, 'capture_state height')
+    assertEqual(captureValue.mode, 'window', 'capture_state mode')
+    assert(/^\d{4}-\d{2}-\d{2}T/.test(captureValue.captured_at), 'capture_state returns an ISO timestamp')
+    assertEqual(sdk.requireCaptureState(captureValue.state_token).width, 8, 'requireCaptureState resolves the stored pixels')
+
+    // state_token path: changed when the ratio exceeds min_changed_ratio.
+    imageQueue = [changedImage]
+    const tokenPlan = format.parseWaitForChangeArgs({ state_token: captureValue.state_token, timeout_ms: 500, interval_ms: 50 })
+    const tokenValue = await facade.waitForChange(tokenPlan, exec, 120_000)
+    assertEqual(tokenValue.result, 'changed', 'wait_for_change state_token path detects a change')
+    assertEqual(tokenValue.baseline_source, 'state_token', 'wait_for_change state_token baseline source')
+    assertEqual(tokenValue.changed_ratio, 1, 'wait_for_change state_token ratio')
+
+    // state_token path: a tiny change stays below a raised min_changed_ratio.
+    imageQueue = [unchangedImage]
+    const flickerState = await facade.captureState(format.parseCaptureStateArgs({ window_id: 'w1' }), exec, 120_000)
+    imageQueue = [tinyChangeImage, tinyChangeImage, tinyChangeImage]
+    const flickerPlan = format.parseWaitForChangeArgs({
+      state_token: flickerState.state_token,
+      min_changed_ratio: 0.5,
+      timeout_ms: 100,
+      interval_ms: 50,
+    })
+    const flickerValue = await facade.waitForChange(flickerPlan, exec, 120_000)
+    assertEqual(flickerValue.result, 'timeout', 'a small flicker stays below min_changed_ratio')
+    assertEqual(flickerValue.changed, false, 'flicker is not a change')
+    assert(Math.abs(flickerValue.changed_ratio - 1 / 64) < 1e-9, 'flicker ratio is 1 of 64 pixels')
+
+    // Unknown/expired token fails with a clear error before any capture.
+    sdk.resetCaptureStateStore()
+    await assertRejects(
+      () => facade.waitForChange(format.parseWaitForChangeArgs({ state_token: captureValue.state_token, timeout_ms: 100, interval_ms: 50 }), exec, 120_000),
+      /state_token/,
+      'an expired state_token is rejected',
+    )
+
+    // auv_click space: "screen" uses the global screen click even with a window
+    // target (Unity/Canvas-safe), and reports the converted window point.
+    calls.length = 0
+    const screenClick = await facade.click(format.parseClickArgs({ x: 10, y: 20, window_id: 'w1', space: 'screen' }), exec, 120_000)
+    const screenClickCall = calls.find((entry) => entry[0] === 'input.click')
+    assert(screenClickCall !== undefined, 'screen-space click uses runner.input.click')
+    assertEqual(screenClickCall[1].coordinateSpace, { case: 'screen', value: true }, 'screen-space click uses a screen Position')
+    assertEqual({ x: screenClickCall[1].x, y: screenClickCall[1].y }, { x: 10, y: 20 }, 'screen-space click coordinates')
+    assert(calls.find((entry) => entry[0] === 'window.click') === undefined, 'screen-space click is not window-targeted')
+    assertEqual(screenClick.space, 'screen', 'click result space')
+    assertEqual(screenClick.screen_point, { x: 10, y: 20 }, 'click result screen_point')
+    assertEqual(screenClick.window_point, { x: -90, y: -180 }, 'screen click reports the window point when a window target is given')
+
+    // auv_click space: "display" delivers a display-relative click.
+    calls.length = 0
+    const displayClick = await facade.click(format.parseClickArgs({ x: 10, y: 20, display_id: 'd1', space: 'display' }), exec, 120_000)
+    const displayClickCall = calls.find((entry) => entry[0] === 'input.click')
+    assertEqual(displayClickCall[1].coordinateSpace, { case: 'displayId', value: 'd1' }, 'display-space click uses a display Position')
+    assertEqual(displayClick.space, 'display', 'display click result space')
+    assertEqual(displayClick.display_point, { x: 10, y: 20 }, 'display click result display_point')
+    assertEqual(displayClick.screen_point, { x: 60, y: 80 }, 'display click result screen_point')
+  } finally {
+    sdk.resetCaptureStateStore()
+    await sdk.disposeTransportState(state)
+  }
 }
 
 async function checkAttachFirstDecision() {
@@ -729,6 +1499,40 @@ async function checkNoCliRuntime() {
   assert(/disposeSdkTransport/.test(index), 'index.js must dispose the SDK transport on unload')
 }
 
+async function checkCapturePrune() {
+  const { mkdtemp, writeFile, utimes, readdir, rm } = await import('node:fs/promises')
+  const os = await import('node:os')
+  const path = await import('node:path')
+  const sdk = await importSrc('transport/sdk.mjs')
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'dsh-auv-prune-'))
+  try {
+    const now = Date.now()
+    const write = async (name, ageMs) => {
+      const filePath = path.join(directory, name)
+      await writeFile(filePath, 'x')
+      const time = new Date(now - ageMs)
+      await utimes(filePath, time, time)
+    }
+    await write('old.webp', 2 * 60 * 60 * 1000)
+    await write('mid.webp', 10 * 60 * 1000)
+    await write('new.webp', 1 * 1000)
+    await write('notes.txt', 3 * 60 * 60 * 1000)
+    const first = await sdk.pruneCaptures({ directory, retentionMs: 60 * 60 * 1000, maxFiles: 10, now })
+    assertEqual(first.deleted, 1, 'prune deletes only expired .webp files')
+    assertEqual((await readdir(directory)).includes('old.webp'), false, 'expired capture removed')
+    assertEqual((await readdir(directory)).includes('notes.txt'), true, 'prune leaves non-webp files alone')
+
+    await write('a.webp', 7 * 1000)
+    await write('b.webp', 6 * 1000)
+    await write('c.webp', 5 * 1000)
+    await sdk.pruneCaptures({ directory, retentionMs: 60 * 60 * 1000, maxFiles: 2, now })
+    const remaining = (await readdir(directory)).filter((entry) => entry.endsWith('.webp')).sort()
+    assertEqual(remaining, ['c.webp', 'new.webp'], 'prune keeps the newest maxFiles captures')
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+}
+
 async function checkDiscoveryFallback() {
   const previousDescriptor = process.env.AUV_DISCOVERY_FILE
   const previousEndpoint = process.env.AUV_ENDPOINT
@@ -778,6 +1582,39 @@ async function checkOfflineExecuteGuards() {
     await assertRejects(() => byName.get('auv_scroll').execute({}, exec), /requires "dy"/, 'auv_scroll must require dy')
     await assertRejects(() => byName.get('auv_ocr').execute({ text: 'Hello', timeout_ms: 5000 }, exec), /only valid with wait/, 'auv_ocr must reject timeout_ms without wait')
     await assertRejects(() => byName.get('auv_screenshot').execute({ window_id: '1', display_id: '1' }, exec), /only one of/, 'auv_screenshot must reject competing targets')
+    await assertRejects(() => byName.get('auv_drag').execute({}, exec), /Missing required parameter "from"/, 'auv_drag must require from')
+    await assertRejects(
+      () => byName.get('auv_drag').execute({ from: { x: 1, y: 2 }, to: { x: 3, y: 4 }, space: 'window' }, exec),
+      /requires window_id or application_id/,
+      'auv_drag must reject window space without a window target',
+    )
+    await assertRejects(() => byName.get('auv_wait_for_change').execute({ timeout_ms: 50 }, exec), /between 100 and 120000/, 'auv_wait_for_change timeout bounds')
+    await assertRejects(
+      () => byName.get('auv_wait_for_change').execute({ window_id: 'w1', region: { x: 0, y: 0, width: 10, height: 10 } }, exec),
+      /region is only supported/,
+      'auv_wait_for_change must reject a region with a window target',
+    )
+    await assertRejects(
+      () => byName.get('auv_wait_for_change').execute({ min_changed_ratio: 2 }, exec),
+      /between 0 and 1/,
+      'auv_wait_for_change must reject an out-of-range min_changed_ratio',
+    )
+    await assertRejects(
+      () => byName.get('auv_wait_for_change').execute({ pixel_threshold: 999 }, exec),
+      /between 0 and 255/,
+      'auv_wait_for_change must reject an out-of-range pixel_threshold',
+    )
+    // An unknown state_token fails before any transport work.
+    await assertRejects(
+      () => byName.get('auv_wait_for_change').execute({ state_token: 'missing-token', timeout_ms: 100, interval_ms: 50 }, exec),
+      /state_token/,
+      'auv_wait_for_change must reject an unknown state_token',
+    )
+    await assertRejects(
+      () => byName.get('auv_capture_state').execute({ window_id: 'w1', display_id: 'd1' }, exec),
+      /not both/,
+      'auv_capture_state must reject competing targets',
+    )
     if (process.platform === 'darwin') {
       await assertRejects(
         () => byName.get('auv_scroll').execute({ dy: 10, x: 1, y: 2 }, exec),
@@ -850,12 +1687,12 @@ async function checkBundle() {
       disposers.push(callback())
     },
   })
-  assertEqual(registered.length, 9, 'bundled apply() should register 9 tools')
-  assert(new Set(registered.map((definition) => definition.name)).size === 9, 'bundled apply() registered duplicate tool names')
+  assertEqual(registered.length, 12, 'bundled apply() should register 12 tools')
+  assert(new Set(registered.map((definition) => definition.name)).size === 12, 'bundled apply() registered duplicate tool names')
   assertEqual(
     registered.map((definition) => definition.name).sort(),
     Object.keys(EXPECTED).sort(),
-    'bundled tool names must match the 9-tool surface',
+    'bundled tool names must match the 12-tool surface',
   )
   assertEqual(disposers.length, 1, 'bundled apply() must register the SDK transport dispose effect')
   assert(typeof disposers[0] === 'function', 'bundled dispose effect must return a disposer')
@@ -867,12 +1704,20 @@ async function main() {
   console.log(`plugin: ${PLUGIN}`)
 
   await check('missing AUV guidance', checkMissingAuvGuidance)
-  await check('tool definitions (9, SDK-only)', checkToolDefinitions)
+  await check('tool definitions (12, SDK-only)', checkToolDefinitions)
   await check('plugin entry point', checkEntryPoint)
   await check('manifest, resources, retired files', checkManifestAndResources)
   await check('SDK argument mapping', checkSdkArgumentMapping)
+  await check('drag curve and coordinate mapping', checkDragAndCoordinateMapping)
+  await check('drag request through the real SDK with a mock transport', checkDragRequestThroughSdkMock)
+  await check('wait-for-change comparison logic', checkWaitForChangeLogic)
+  await check('pixel diff and capture-state store', checkPixelDiffAndStateStore)
+  await check('keys policy/focus planning', checkKeysPlanning)
+  await check('repeat guard', checkRepeatGuard)
+  await check('drag/keys/wait/capture/click-space with a fake runner (no input)', checkDragKeysWaitWithFakeRunner)
   await check('attach-first decision and ownership', checkAttachFirstDecision)
   await check('SDK doctor report helpers', checkDoctorHelpers)
+  await check('capture cleanup retention and file cap', checkCapturePrune)
   await check('no CLI or catalog in runtime source', checkNoCliRuntime)
   await check('discovery falls back quickly when no daemon exists', checkDiscoveryFallback)
   await check('offline execute guards', checkOfflineExecuteGuards)

@@ -7,7 +7,6 @@
 Adds [AUV](https://github.com/moeru-ai/auv) desktop automation to
 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) as native model tools.
 
-Uses [`@auv-js/sdk`](https://www.npmjs.com/package/@auv-js/sdk).
 
 > [!WARNING]
 > **Please install AUV before using this plugin.** On macOS, also grant **DeepSeek Harness** the
@@ -51,12 +50,11 @@ Links:
 - Terms and concepts: <https://github.com/moeru-ai/auv/blob/main/docs/TERMS_AND_CONCEPTS.md>
 - Supported apps and extensions: <https://github.com/moeru-ai/auv/tree/main/supported>
 
-Sections: [Before you start](#before-you-start) · [Install](#install) · [macOS permissions](#macos-permissions) · [Tools](#tools) · [Configuration](#configuration) · [Daemon](#daemon-lifecycle) · [Why not MCP](#why-not-the-mcp-bridge) · [Troubleshooting](#troubleshooting) · [Development](#development)
+Sections: [Before you start](#before-you-start) · [Install](#install) · [macOS permissions](#macos-permissions) · [Tools](#tools) · [Configuration](#configuration) · [Daemon](#daemon-lifecycle) · [Troubleshooting](#troubleshooting) · [Status](#status)
 
 ## Install
 
-The plugin is prebuilt. The release tarball contains only the files the plugin needs at runtime
-(about 330 KB): `dist/index.mjs`, the manifest, the plugin patch, locales and the icon.
+The plugin is prebuilt.
 
 Open **Settings → Plugins → Add plugin** and paste the latest release tarball:
 
@@ -64,12 +62,12 @@ Open **Settings → Plugins → Add plugin** and paste the latest release tarbal
 https://github.com/liliumneko/dsh-plugin-auv/releases/latest/download/dsh-plugin-auv.tgz
 ```
 
-Click install, then enable **AUV desktop automation**. The nine `auv_*` tools show up on the next
+Click install, then enable **AUV desktop automation**. The twelve `auv_*` tools show up on the next
 model step. Run `auv_doctor` first.
 
-The same input box also accepts an npm package name or a local directory. The repository itself
-does not contain the built bundle, so installing from the repository address does not work; use
-the release tarball, or build from a clone for development.
+The same input box also accepts an npm package name or a local directory. The repository does not
+contain the built bundle, so use the release tarball for normal installs. Development builds and
+the release process are documented in [docs/implementation.md](https://github.com/liliumneko/dsh-plugin-auv/blob/main/docs/implementation.md).
 
 From a session you can use the command form with the same link:
 
@@ -77,18 +75,7 @@ From a session you can use the command form with the same link:
 plugin_manager action=install_bundle target=https://github.com/liliumneko/dsh-plugin-auv/releases/latest/download/dsh-plugin-auv.tgz
 ```
 
-To change the code, clone the repository, install and build it, then install the local directory:
-
-```
-git clone https://github.com/liliumneko/dsh-plugin-auv.git
-cd dsh-plugin-auv
-pnpm install
-pnpm build
-plugin_manager action=install_bundle target=/absolute/path/to/dsh-plugin-auv
-```
-
-A local directory install is linked, so rebuild with `pnpm build` and restart Harness after code
-changes. Disable the plugin with
+Disable the plugin with
 `plugin_manager action=set_plugin target=dsh-auv enabled=false`.
 
 ## macOS permissions
@@ -109,18 +96,20 @@ Accessibility.
 
 ## Tools
 
-All nine tools talk to AUV through the SDK. Every call validates its arguments first, then uses the
-daemon connection (see [Daemon lifecycle](#daemon-lifecycle)).
+All twelve tools control AUV through the daemon connection described in [Daemon lifecycle](#daemon-lifecycle).
 
 | Tool | What it does |
 | --- | --- |
 | `auv_doctor` | Reports permissions, daemon state and whether the setup is ready. Returns install and permission guidance when something is missing; it does not throw. |
-| `auv_screenshot` | Captures the desktop, a window, an app, a display or a screen region. Returns a `.webp` file path for `read_image`. |
-| `auv_ocr` | Finds text on screen or in a window. With `wait: true` it polls until the text appears. |
-| `auv_click` | Clicks text found by OCR, or an exact point. Optional button, target and click area. |
+| `auv_screenshot` | Captures the desktop, a window, an app, a display or a screen region. Returns a `.webp` file path for `read_image`, plus capture bounds and pixel metadata. |
+| `auv_ocr` | Finds text on screen or in a window. With `wait: true` it polls until the text appears. Matches carry screen, window and image pixel points. |
+| `auv_click` | Clicks text found by OCR, or an exact point. Optional button, target, click area and coordinate space (`space: "screen"` is the reliable choice for Unity/Canvas apps). |
 | `auv_type` | Types or pastes text into the focused control. |
-| `auv_keys` | Presses one key combination, optionally repeated. |
+| `auv_keys` | Presses one key combination, optionally repeated. `policy` and `focus` control delivery. |
 | `auv_scroll` | Scrolls inside a window, using window-local coordinates. |
+| `auv_drag` | Drags the mouse from one point to another; screen, window or display coordinates, button, duration, and an optional focus-first step. |
+| `auv_capture_state` | Captures an in-memory snapshot of a window or region and returns a `state_token`; use it before an action. |
+| `auv_wait_for_change` | Watches a window or region and compares frames, returning `changed`, `no_effect` or `timeout` with a `changed_ratio`. Pass a `state_token` from `auv_capture_state` for the reliable check. |
 | `auv_windows` | Lists windows with ids, app ids, titles, frames and state. |
 | `auv_activate` | Brings an application to the front. |
 
@@ -134,28 +123,50 @@ look at one; the tool result never contains image bytes.
 | `AUV_BIN` | searched in `PATH`, then `/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin`, `~/.cargo/bin` | Full path to the `auv` executable. Needed only when the plugin has to start its own daemon. Invalid values fail with install instructions. |
 | `AUV_DSH_SDK_STORE_ROOT` | `$DSH_HOME/auv/sdk` (usually `~/.dsh/auv/sdk`) | Store directory for the daemon the plugin starts itself. |
 | `AUV_DSH_CAPTURE_DIR` | `$DSH_HOME/auv/sdk-captures` (usually `~/.dsh/auv/sdk-captures`) | Where screenshots are written for `read_image`. |
+| `AUV_DSH_CAPTURE_RETENTION_MS` | `3600000` (one hour) | Delete `.webp` screenshots older than this after each new capture. Set `0` to keep files forever. |
+| `AUV_DSH_CAPTURE_MAX_FILES` | `200` | Keep at most this many screenshot files (newest win). Set `0` for no count limit. |
 
 AUV's own `AUV_ENDPOINT` and `AUV_DISCOVERY_FILE` are honored when finding a daemon to connect to.
 `DSH_HOME` changes the default data directory above.
 
 ## Daemon lifecycle
 
-The plugin does not start a daemon if you already have one.
+If an AUV daemon is already running, the plugin connects to it and leaves it alone. Otherwise it
+starts a private daemon for this plugin and stops it when Harness unloads or reloads. `auv_doctor`
+shows which mode is active and where the daemon listens.
 
-- **First tool call:** it looks for a running AUV daemon and connects to it (about two seconds at
-  most). If none is found, it starts a private `auv serve` process: its own socket, a launcher
-  token, no registration in AUV's discovery file, and it exits when Harness exits. Only in this
-  case does it need the `auv` executable.
-- **Later calls:** reuse the same connection. When the daemon goes away, the next call connects
-  again or starts a new one.
-- **Unload or reload:** the connection is closed. A daemon started by the plugin is stopped; a
-  daemon you started yourself keeps running.
-- **Doctor:** tells you whether it is connected to an existing daemon or using one it started, and
-  where that daemon listens.
+## Coordinates and verifying an input
 
-Screenshots use logical resolution (one pixel per screen point) and are capped at 2048×2048. The
-SDK does not create AUV runs per call, so tool results have `run_id: null`; that differs from the
-old command line based version.
+Points returned by the tools are logical screen points. Inputs accept screen, window or display
+coordinates; each tool description says which space applies.
+
+When a result carries a capture, convert between spaces with:
+
+```
+image_pixel  = (screen_point - bounds.origin) * pixel_ratio
+window_point = screen_point - window.frame.origin
+screen_point = window_point + window.frame.origin
+```
+
+`image_pixel` belongs to the capture that produced the value, not necessarily to a screenshot you
+took earlier; `pixel_ratio` is `pixel_size.width / bounds.width`. Screenshot values include
+`bounds`, `origin`, `scale_factor`, `pixel_size` and `coordinate_note`; OCR matches include
+`screen_point`, `image_pixel`, `window_point` and `pixel_ratio` next to `bounds`.
+
+Input tools return delivery evidence, not proof that the app reacted. To verify an input:
+
+1. Call `auv_capture_state` on the target window or region before the action.
+2. Do the action (`auv_click`, `auv_drag`, `auv_type`, `auv_keys`, `auv_scroll`).
+3. Call `auv_wait_for_change` with the returned `state_token`. It compares downscaled RGBA frames
+   and returns `changed_ratio`; `min_changed_ratio` and `pixel_threshold` filter cursor or button
+   flicker.
+
+`baseline_hash` is still accepted for a coarse ThumbHash-only check, but `state_token` is the
+reliable path. The default `min_changed_ratio` of 0.01 ignores cursor and button flicker; for a
+small change (a log line, a checkbox) capture just that region, or lower `min_changed_ratio`
+(for example 0.0005). `changed: false` only means the screen did not change enough; it is not
+proof that keys were delivered. The plugin also stops the third identical mutating call within 30 seconds
+with `no_effect_repeat`; pass `allow_repeat: true` to send it anyway after re-checking the screen.
 
 ## Examples
 
@@ -169,19 +180,11 @@ auv_click { "text": "Save", "application_id": "com.apple.TextEdit" }
 auv_type { "text": "hello", "application_id": "com.apple.TextEdit", "mode": "paste" }
 auv_keys { "keys": ["cmd", "t"], "repeat": 3, "interval_ms": 120 }
 auv_scroll { "window_id": "<id from auv_windows>", "dy": 600 }
+auv_drag { "from": { "x": 300, "y": 500 }, "to": { "x": 600, "y": 500 }, "duration_ms": 400 }
+auv_capture_state { "window_id": "<id from auv_windows>" }        # → state_token
+auv_drag { "from": { "x": 300, "y": 500 }, "to": { "x": 600, "y": 500 } }
+auv_wait_for_change { "state_token": "<state_token>", "timeout_ms": 3000 }
 ```
-
-## Why not the MCP bridge
-
-AUV ships `auv mcp serve`, and `@deepseek-ai/dsh-mcp-client` can connect it with no code. That
-connection loads AUV's full MCP schema every request: measured 181,539 bytes pretty / 117,422 bytes
-compact on AUV 0.0.43, about 29k tokens, most of it the command list inside the single `invoke`
-tool.
-
-This plugin has nine tools whose schemas total 10,645 bytes, about 2.7k tokens — roughly 11 times
-smaller — and there is no separate MCP process or handshake. The bundle is about 1.45 MB unpacked
-because the SDK and its gRPC client are included; the release tarball is about 330 KB. It is
-loaded once and does not add to the model context.
 
 ## Troubleshooting
 
@@ -202,45 +205,25 @@ the plugin has to start its own daemon. The plugin never replaces or stops a dae
 **OCR returns `vision OCR failed …`.** Screen Recording is missing or the grant has not taken
 effect yet. Grant it, restart Harness and retry. Until then, use `auv_screenshot` plus `read_image`.
 
-**`auv_ocr` with `wait: true` times out.** The SDK version polls `findText` on the client. If the
-text is still loading, a shorter `timeout_ms` retry usually works better than a long wait.
+**`auv_ocr` with `wait: true` times out.** If the text is still loading, retry with a shorter
+`timeout_ms` instead of one long wait.
 
-**A screenshot path cannot be read.** Pass the exact absolute path to `read_image`. Files older
-than seven days are pruned.
+**A screenshot path cannot be read.** Pass the exact absolute path to `read_image`. Capture files
+are temporary: after every new screenshot, files older than `AUV_DSH_CAPTURE_RETENTION_MS` (one
+hour by default) or beyond `AUV_DSH_CAPTURE_MAX_FILES` (200) are deleted. Increase either value if
+you need screenshots to survive a longer session.
 
-## Development
-
-The source is plain ESM in `index.js` and `src/`. The runtime artifact is one file,
-`dist/index.mjs`, built with [tsdown](https://tsdown.dev). It includes the nine tool definitions,
-the SDK transport and the `es-toolkit` helpers; Node builtins stay external. There are no runtime
-npm dependencies. `dist/` is not committed; GitHub Actions builds it and attaches the packed
-tarball to each release.
-
-```sh
-pnpm install
-pnpm build     # write dist/index.mjs
-pnpm check     # offline checks: tools, manifest, SDK mapping, attach logic, bundle
-```
-
-The bundle is about 1.45 MB unpacked; the release tarball is about 330 KB. Attach behavior and
-daemon ownership are covered by the offline checks; they use fake transport dependencies, so no
-daemon is needed.
-
-To publish a release, bump `version` in `package.json`, commit, and push a matching tag
-(`vX.Y.Z`). GitHub Actions installs dependencies, builds, runs the checks, packs the plugin and
-attaches `dsh-plugin-auv-X.Y.Z.tgz` and `dsh-plugin-auv.tgz` to the release.
+**Keys do not reach a Unity/Canvas game (Space, Return).** AUV key injection can report
+`completed` while the game ignores the event; this has been observed with Stacklands. Use screen
+clicks or OCR-driven clicks instead, and treat `changed: false` as "the screen did not change", not
+as proof that the key was not delivered. This is an upstream AUV driver limitation.
 
 ## Status
 
-Tested on macOS 27.2 with AUV 0.0.43 and DeepSeek Harness. The nine tools were checked with
-read-only calls (doctor, windows, screenshot → `read_image`, OCR) in both modes: connecting to a
-running daemon, and starting the plugin's own daemon. The daemon was stopped on unload when the
-plugin had started it, and left running when it had not. Input tools (click, type, keys, scroll,
-activate) were tested by argument validation and earlier CLI-based tests; they were not re-run as
-real desktop input in this version.
-
-Historical evidence, including the older CLI implementation and the SDK API research, is in
-[`notes/`](notes/).
+Tested on macOS 27.2 with AUV 0.0.43 and DeepSeek Harness. Drag, screen-coordinate clicks and
+change detection work on a real Stacklands session. AUV key injection does not reach that Unity
+game; this is an upstream driver limitation. Build, release, design and verification details are in
+[docs/implementation.md](https://github.com/liliumneko/dsh-plugin-auv/blob/main/docs/implementation.md).
 
 ## Attribution
 
