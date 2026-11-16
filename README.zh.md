@@ -55,7 +55,7 @@ https://github.com/liliumneko/dsh-plugin-auv/releases/latest/download/dsh-plugin
 
 点安装，然后启用「AUV 桌面自动化」。安装后 14 个 `auv_*` 工具会在下一步模型调用时出现；建议先跑 `auv_doctor`。
 
-同一个输入框也接受 npm 包名和本地目录。仓库里不放构建产物，正常安装请用 release tarball；开发构建和发版流程见 [docs/implementation.md](https://github.com/liliumneko/dsh-plugin-auv/blob/main/docs/implementation.md)。
+同一个输入框也接受 npm 包名和本地目录。仓库里不放构建产物，正常安装请用 release tarball。
 
 在会话里也可以用命令，`target` 填同一个链接：
 

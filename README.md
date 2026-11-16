@@ -66,8 +66,7 @@ Click install, then enable **AUV desktop automation**. The fourteen `auv_*` tool
 model step. Run `auv_doctor` first.
 
 The same input box also accepts an npm package name or a local directory. The repository does not
-contain the built bundle, so use the release tarball for normal installs. Development builds and
-the release process are documented in [docs/implementation.md](https://github.com/liliumneko/dsh-plugin-auv/blob/main/docs/implementation.md).
+contain the built bundle, so use the release tarball for normal installs.
 
 From a session you can use the command form with the same link:
 
