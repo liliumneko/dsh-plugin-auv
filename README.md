@@ -62,7 +62,7 @@ Open **Settings → Plugins → Add plugin** and paste the latest release tarbal
 https://github.com/liliumneko/dsh-plugin-auv/releases/latest/download/dsh-plugin-auv.tgz
 ```
 
-Click install, then enable **AUV desktop automation**. The twelve `auv_*` tools show up on the next
+Click install, then enable **AUV desktop automation**. The fourteen `auv_*` tools show up on the next
 model step. Run `auv_doctor` first.
 
 The same input box also accepts an npm package name or a local directory. The repository does not
@@ -91,26 +91,28 @@ AUV controls the real desktop, so macOS must trust **DeepSeek Harness**, not jus
 4. Run `auv_doctor`. `all_ok` should be `true`; the report shows which permission is missing
    otherwise.
 
-Screenshots and OCR need Screen Recording. Clicking, typing, key presses and scrolling need
-Accessibility.
+Screenshots and OCR need Screen Recording. Clicking, typing, key presses, scrolling and window
+changes need Accessibility.
 
 ## Tools
 
-All twelve tools control AUV through the daemon connection described in [Daemon lifecycle](#daemon-lifecycle).
+All fourteen tools control AUV through the daemon connection described in [Daemon lifecycle](#daemon-lifecycle).
 
 | Tool | What it does |
 | --- | --- |
 | `auv_doctor` | Reports permissions, daemon state and whether the setup is ready. Returns install and permission guidance when something is missing; it does not throw. |
 | `auv_screenshot` | Captures the desktop, a window, an app, a display or a screen region. Returns a `.webp` file path for `read_image`, plus capture bounds and pixel metadata. |
-| `auv_ocr` | Finds text on screen or in a window. With `wait: true` it polls until the text appears. Matches carry screen, window and image pixel points. |
-| `auv_click` | Clicks text found by OCR, or an exact point. Optional button, target, click area and coordinate space (`space: "screen"` is the reliable choice for Unity/Canvas apps). |
-| `auv_type` | Types or pastes text into the focused control. |
-| `auv_keys` | Presses one key combination, optionally repeated. `policy` and `focus` control delivery. |
-| `auv_scroll` | Scrolls inside a window, using window-local coordinates. |
+| `auv_ocr` | Finds text on screen or in a window, or reads all of it with `mode: "read"` (returns `text` plus `result.regions`). With `wait: true` it polls until the text appears (find mode). Targets a window, app, `display_id` or screen `region`, with optional `recognition_languages` and `custom_words`. Matches and regions carry screen, window and image pixel points. |
+| `auv_click` | Clicks text found by OCR, or an exact point. Optional button, target, click area and coordinate space (`space: "screen"` is the reliable choice for Unity/Canvas apps); `count` repeats the click (2 = double click), `modifiers` adds cmd/shift/ctrl/alt, and `window_strategy` selects how a window-targeted click is delivered. |
+| `auv_type` | Types or pastes text into the focused control. `submit` presses return/search/done/go afterwards, and `replace_existing` replaces the current field content. |
+| `auv_keys` | Presses one key combination, optionally repeated; `hold_ms` holds the keys down before releasing (not with `repeat`). `policy` and `focus` control delivery. |
+| `auv_scroll` | Scrolls inside a window, using window-local coordinates. `smooth` animates the scroll and `until_text` scrolls until that text appears; both need `window_id`. |
 | `auv_drag` | Drags the mouse from one point to another; screen, window or display coordinates, button, duration, and an optional focus-first step. |
 | `auv_capture_state` | Captures an in-memory snapshot of a window or region and returns a `state_token`; use it before an action. |
 | `auv_wait_for_change` | Watches a window or region and compares frames, returning `changed`, `no_effect` or `timeout` with a `changed_ratio`. Pass a `state_token` from `auv_capture_state` for the reliable check. |
 | `auv_windows` | Lists windows with ids, app ids, titles, frames and state. |
+| `auv_window` | Focuses, minimizes, maximizes, restores, moves/resizes (`set_frame`) or refreshes one window by `window_id`. Returns the window before and after, and warns when the app settles a different frame. |
+| `auv_displays` | Lists displays with id, name, frame, `scale_factor` and primary/built-in flags. |
 | `auv_activate` | Brings an application to the front. |
 
 Screenshots are saved as `.webp` files. Call DSH's `read_image` tool with the returned path to
@@ -150,8 +152,8 @@ screen_point = window_point + window.frame.origin
 
 `image_pixel` belongs to the capture that produced the value, not necessarily to a screenshot you
 took earlier; `pixel_ratio` is `pixel_size.width / bounds.width`. Screenshot values include
-`bounds`, `origin`, `scale_factor`, `pixel_size` and `coordinate_note`; OCR matches include
-`screen_point`, `image_pixel`, `window_point` and `pixel_ratio` next to `bounds`.
+`bounds`, `origin`, `scale_factor`, `pixel_size` and `coordinate_note`; OCR matches and read-mode
+regions include `screen_point`, `image_pixel`, `window_point` and `pixel_ratio` next to `bounds`.
 
 Input tools return delivery evidence, not proof that the app reacted. To verify an input:
 
@@ -173,13 +175,18 @@ with `no_effect_repeat`; pass `allow_repeat: true` to send it anyway after re-ch
 ```
 auv_doctor {}
 auv_windows {}
+auv_window { "window_id": "<id from auv_windows>", "action": "maximize" }
+auv_displays {}
 auv_screenshot { "window_id": "<id from auv_windows>" }
 # then read_image { "file_path": "<artifact_path>" }
 auv_ocr { "text": "Save" }
+auv_ocr { "mode": "read", "window_id": "<id from auv_windows>" }
 auv_click { "text": "Save", "application_id": "com.apple.TextEdit" }
 auv_type { "text": "hello", "application_id": "com.apple.TextEdit", "mode": "paste" }
+auv_type { "text": "query", "submit": "return" }
 auv_keys { "keys": ["cmd", "t"], "repeat": 3, "interval_ms": 120 }
 auv_scroll { "window_id": "<id from auv_windows>", "dy": 600 }
+auv_scroll { "window_id": "<id from auv_windows>", "dy": 400, "until_text": "Settings" }
 auv_drag { "from": { "x": 300, "y": 500 }, "to": { "x": 600, "y": 500 }, "duration_ms": 400 }
 auv_capture_state { "window_id": "<id from auv_windows>" }        # → state_token
 auv_drag { "from": { "x": 300, "y": 500 }, "to": { "x": 600, "y": 500 } }
@@ -216,22 +223,10 @@ you need screenshots to survive a longer session.
 **Keys do not reach a Unity/Canvas game (Space, Return).** AUV key injection can report
 `completed` while the game ignores the event; this has been observed with Stacklands. Use screen
 clicks or OCR-driven clicks instead, and treat `changed: false` as "the screen did not change", not
-as proof that the key was not delivered. This is an upstream AUV driver limitation.
-
-## Status
-
-Tested on macOS 27.2 with AUV 0.0.43 and DeepSeek Harness. Drag, screen-coordinate clicks and
-change detection work on a real Stacklands session. AUV key injection does not reach that Unity
-game; this is an upstream driver limitation. Build, release, design and verification details are in
-[docs/implementation.md](https://github.com/liliumneko/dsh-plugin-auv/blob/main/docs/implementation.md).
-
+as proof that the key was not delivered.
 ## Attribution
 
 The plugin icon is the official AUV logo (`docs/assets/logo-light.svg` in the
 [AUV repository](https://github.com/moeru-ai/auv)) on a white rounded background. AUV and the AUV
 logo are © the moeru-ai contributors and licensed under
 [Apache-2.0](https://github.com/moeru-ai/auv/blob/main/LICENSE.md).
-
-## License
-
-[Apache-2.0](LICENSE)

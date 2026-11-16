@@ -10,16 +10,16 @@
  * Build: pnpm build
  */
 
-import { defineConfig } from 'tsdown'
+import { defineConfig } from "tsdown";
 
 export default defineConfig({
-  entry: ['index.js'],
-  format: ['esm'],
-  platform: 'node',
-  target: 'node20',
-  outDir: 'dist',
+  entry: ["index.js"],
+  format: ["esm"],
+  platform: "node",
+  target: "node20",
+  outDir: "dist",
   clean: true,
   dts: false,
   sourcemap: false,
   report: true,
-})
+});

@@ -151,6 +151,8 @@ vite.config.ts.timestamp-*
 # DeepSeek Harness / AUV local artifacts
 .auv/
 .auvtest/
+docs/
+notes/
 .DS_Store
 
 # the runtime bundle is built by CI and shipped in the release tarball

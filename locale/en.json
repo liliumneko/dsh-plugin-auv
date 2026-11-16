@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "AUV desktop automation",
-    "description": "Controls macOS apps through AUV: screenshots, OCR, clicks, typing, keys, scrolling, and window management."
+    "description": "Controls macOS apps through AUV: screenshots, OCR, clicks, typing, keys, scrolling, windows, and displays."
   }
 }

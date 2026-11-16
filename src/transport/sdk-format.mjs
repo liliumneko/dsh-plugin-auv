@@ -12,166 +12,289 @@
  * snake_case JSON shapes the tool renderers understand.
  */
 
-import { isPlainObject } from 'es-toolkit'
+import { isPlainObject } from "es-toolkit";
 
 // ---------------------------------------------------------------------------
 // Shared literals for the 0.2.0 tools
 // ---------------------------------------------------------------------------
 
 /** Delivery policies accepted by `auv_keys` (mirrors AUV `InputPolicy`). */
-export const KEY_POLICIES = ['background-only', 'background-preferred', 'foreground-preferred']
+export const KEY_POLICIES = [
+  "background-only",
+  "background-preferred",
+  "foreground-preferred",
+];
 
 /** Coordinate spaces accepted by `auv_drag`. */
-export const DRAG_SPACES = ['screen', 'window', 'display']
+export const DRAG_SPACES = ["screen", "window", "display"];
 
 /** Mouse buttons accepted by `auv_drag` / `auv_click` x/y clicks. */
-export const MOUSE_BUTTONS = ['left', 'right', 'middle']
+export const MOUSE_BUTTONS = ["left", "right", "middle"];
 
 /** AUV `MouseButton` numeric values, used to build SDK requests. */
-export const MOUSE_BUTTON_VALUES = Object.freeze({ left: 1, right: 2, middle: 3 })
+export const MOUSE_BUTTON_VALUES = Object.freeze({
+  left: 1,
+  right: 2,
+  middle: 3,
+});
 
 /** `auv_drag` defaults/limits. */
-export const DEFAULT_DRAG_DURATION_MS = 300
-export const MAX_DRAG_DURATION_MS = 30_000
+export const DEFAULT_DRAG_DURATION_MS = 300;
+export const MAX_DRAG_DURATION_MS = 30_000;
 
 /** `auv_wait_for_change` defaults/limits. */
-export const DEFAULT_WAIT_TIMEOUT_MS = 5_000
-export const MIN_WAIT_TIMEOUT_MS = 100
-export const MAX_WAIT_TIMEOUT_MS = 120_000
-export const DEFAULT_WAIT_INTERVAL_MS = 200
-export const MIN_WAIT_INTERVAL_MS = 50
-export const MAX_WAIT_INTERVAL_MS = 5_000
+export const DEFAULT_WAIT_TIMEOUT_MS = 5_000;
+export const MIN_WAIT_TIMEOUT_MS = 100;
+export const MAX_WAIT_TIMEOUT_MS = 120_000;
+export const DEFAULT_WAIT_INTERVAL_MS = 200;
+export const MIN_WAIT_INTERVAL_MS = 50;
+export const MAX_WAIT_INTERVAL_MS = 5_000;
 
 /** Pixel-ratio comparison defaults for `auv_wait_for_change`. */
-export const DEFAULT_MIN_CHANGED_RATIO = 0.01
-export const DEFAULT_PIXEL_THRESHOLD = 24
+export const DEFAULT_MIN_CHANGED_RATIO = 0.01;
+export const DEFAULT_PIXEL_THRESHOLD = 24;
 
 /** `auv_capture_state`: downscaled RGBA snapshots kept in memory. */
-export const CAPTURE_STATE_MAX_SIZE = 320
-export const CAPTURE_STATE_MAX_ENTRIES = 20
-export const CAPTURE_STATE_TTL_MS = 5 * 60 * 1000
+export const CAPTURE_STATE_MAX_SIZE = 320;
+export const CAPTURE_STATE_MAX_ENTRIES = 20;
+export const CAPTURE_STATE_TTL_MS = 5 * 60 * 1000;
 
 /** Coordinate spaces accepted by `auv_click` x/y clicks. */
-export const CLICK_SPACES = ['screen', 'window', 'display']
+export const CLICK_SPACES = ["screen", "window", "display"];
+
+/** Click modifiers accepted by `auv_click` (`cmd` is the macOS Command key). */
+export const CLICK_MODIFIERS = ["cmd", "shift", "ctrl", "alt"];
+
+/** Public modifier name -> AUV `ClickModifiers` field name. */
+export const CLICK_MODIFIER_VALUES = Object.freeze({
+  cmd: "meta",
+  shift: "shift",
+  ctrl: "control",
+  alt: "alt",
+});
+
+/** Window-targeted click strategies accepted by `auv_click`. */
+export const WINDOW_CLICK_STRATEGIES = ["chromium-compatible", "pid-targeted"];
+
+/** Public strategy name -> AUV `WindowClickStrategy` numeric value. */
+export const WINDOW_CLICK_STRATEGY_VALUES = Object.freeze({
+  "chromium-compatible": 1,
+  "pid-targeted": 2,
+});
+
+/** `auv_click` click-count bound (AUV `Click.count` is a uint32 in [1,255]). */
+export const MAX_CLICK_COUNT = 255;
+
+/** Submit keys accepted by `auv_type` (AUV `TextSubmit`). */
+export const TEXT_SUBMITS = ["none", "return", "search", "done", "go"];
+
+/** Public submit name -> AUV `TextSubmit` numeric value. */
+export const TEXT_SUBMIT_VALUES = Object.freeze({
+  none: 1,
+  return: 2,
+  search: 3,
+  done: 4,
+  go: 5,
+});
+
+/** `auv_keys` hold duration bound (milliseconds). */
+export const MAX_HOLD_MS = 30_000;
+
+/** `auv_scroll` smooth-motion defaults (AUV `ScrollMotion`). */
+export const DEFAULT_SCROLL_MOTION_MS = 300;
+export const SCROLL_MOTION_SAMPLE_RATE_HZ = 60;
+
+/** Actions accepted by `auv_window`. */
+export const WINDOW_ACTIONS = [
+  "focus",
+  "minimize",
+  "maximize",
+  "restore",
+  "set_frame",
+  "refresh",
+];
+
+/** AUV `ScrollUntilStopReason` names, indexed by enum value. */
+export const SCROLL_UNTIL_STOP_REASON_NAMES = [
+  "unspecified",
+  "end_by_no_visual_progress",
+  "text_visible",
+  "budget_exhausted",
+  "predicate_satisfied",
+  "no_visual_progress_from_start",
+];
 
 /** Repeat guard tuning: the Nth identical mutation inside the window is blocked. */
-export const REPEAT_GUARD_LIMIT = 3
-export const REPEAT_GUARD_WINDOW_MS = 30_000
+export const REPEAT_GUARD_LIMIT = 3;
+export const REPEAT_GUARD_WINDOW_MS = 30_000;
 
 /** Returned as `message` when the repeat guard blocks a mutating call. */
 export const REPEAT_GUARD_MESSAGE =
-  'Same call repeated without a change; take a new screenshot and re-locate before trying again. Pass allow_repeat:true to send it anyway.'
+  "Same call repeated without a change; take a new screenshot and re-locate before trying again. Pass allow_repeat:true to send it anyway.";
 
 /**
  * Shown in screenshot/OCR values: how to turn screen points into image pixels
  * and window points.
  */
 export const COORDINATE_NOTE =
-  'All points are logical screen points. image_pixel = (screen_point - bounds.origin) * pixel_ratio, where pixel_ratio = pixel_size.width / bounds.size.width (equal to scale_factor for LOGICAL captures); window_point = screen_point - window.frame.origin.'
-
+  "All points are logical screen points. image_pixel = (screen_point - bounds.origin) * pixel_ratio, where pixel_ratio = pixel_size.width / bounds.size.width (equal to scale_factor for LOGICAL captures); window_point = screen_point - window.frame.origin.";
 
 // ---------------------------------------------------------------------------
 // Small helpers (mirrors of the helpers in src/tools.mjs)
 // ---------------------------------------------------------------------------
 
 export function messageOf(error) {
-  return error instanceof Error ? error.message : String(error)
+  return error instanceof Error ? error.message : String(error);
 }
 
 function optionalString(args, key) {
-  const value = args[key]
-  if (typeof value !== 'string') return undefined
-  const trimmed = value.trim()
-  return trimmed === '' ? undefined : trimmed
+  const value = args[key];
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed === "" ? undefined : trimmed;
 }
 
 function requiredString(args, key, label = key) {
-  const value = optionalString(args, key)
-  if (value === undefined) throw new Error(`Missing required parameter "${label}".`)
-  return value
+  const value = optionalString(args, key);
+  if (value === undefined)
+    throw new Error(`Missing required parameter "${label}".`);
+  return value;
 }
 
 function optionalNumber(args, key) {
-  const value = args[key]
-  if (value === undefined || value === null) return undefined
-  const number = Number(value)
-  if (!Number.isFinite(number)) throw new Error(`Parameter "${key}" must be a finite number.`)
-  return number
+  const value = args[key];
+  if (value === undefined || value === null) return undefined;
+  const number = Number(value);
+  if (!Number.isFinite(number))
+    throw new Error(`Parameter "${key}" must be a finite number.`);
+  return number;
 }
 
 function optionalInteger(args, key) {
-  const number = optionalNumber(args, key)
-  if (number === undefined) return undefined
-  if (!Number.isInteger(number)) throw new Error(`Parameter "${key}" must be an integer.`)
-  return number
+  const number = optionalNumber(args, key);
+  if (number === undefined) return undefined;
+  if (!Number.isInteger(number))
+    throw new Error(`Parameter "${key}" must be an integer.`);
+  return number;
 }
 
 function optionalBoundedNumber(args, key, fallback, minimum, maximum) {
-  const number = optionalNumber(args, key)
-  if (number === undefined) return fallback
-  if (number < minimum || number > maximum) throw new Error(`Parameter "${key}" must be between ${minimum} and ${maximum}.`)
-  return number
+  const number = optionalNumber(args, key);
+  if (number === undefined) return fallback;
+  if (number < minimum || number > maximum)
+    throw new Error(
+      `Parameter "${key}" must be between ${minimum} and ${maximum}.`,
+    );
+  return number;
 }
 
 function optionalBoundedInteger(args, key, fallback, minimum, maximum) {
-  const number = optionalInteger(args, key)
-  if (number === undefined) return fallback
-  if (number < minimum || number > maximum) throw new Error(`Parameter "${key}" must be between ${minimum} and ${maximum}.`)
-  return number
+  const number = optionalInteger(args, key);
+  if (number === undefined) return fallback;
+  if (number < minimum || number > maximum)
+    throw new Error(
+      `Parameter "${key}" must be between ${minimum} and ${maximum}.`,
+    );
+  return number;
 }
 
 function optionalEnum(args, key, allowed) {
-  const value = optionalString(args, key)
-  if (value === undefined) return undefined
-  if (!allowed.includes(value)) throw new Error(`Parameter "${key}" must be one of ${allowed.map((entry) => `"${entry}"`).join(', ')}.`)
-  return value
+  const value = optionalString(args, key);
+  if (value === undefined) return undefined;
+  if (!allowed.includes(value))
+    throw new Error(
+      `Parameter "${key}" must be one of ${allowed.map((entry) => `"${entry}"`).join(", ")}.`,
+    );
+  return value;
 }
 
 function optionalObject(args, key) {
-  const value = args[key]
-  if (value === undefined || value === null) return undefined
-  if (!isPlainObject(value)) throw new Error(`Parameter "${key}" must be an object.`)
-  return value
+  const value = args[key];
+  if (value === undefined || value === null) return undefined;
+  if (!isPlainObject(value))
+    throw new Error(`Parameter "${key}" must be an object.`);
+  return value;
+}
+
+/** An optional array of non-empty strings; empty arrays count as omitted. */
+function optionalStringArray(args, key) {
+  const value = args[key];
+  if (value === undefined || value === null) return undefined;
+  if (!Array.isArray(value))
+    throw new Error(`Parameter "${key}" must be an array of strings.`);
+  const entries = [];
+  for (const entry of value) {
+    if (typeof entry !== "string" || entry.trim() === "") {
+      throw new Error(
+        `Parameter "${key}" must be an array of non-empty strings.`,
+      );
+    }
+    entries.push(entry.trim());
+  }
+  return entries.length === 0 ? undefined : entries;
+}
+
+/** An optional array of strings, each restricted to `allowed`. */
+function optionalEnumArray(args, key, allowed) {
+  const entries = optionalStringArray(args, key);
+  if (entries === undefined) return undefined;
+  for (const entry of entries) {
+    if (!allowed.includes(entry)) {
+      throw new Error(
+        `Parameter "${key}" entries must be one of ${allowed.map((value) => `"${value}"`).join(", ")}.`,
+      );
+    }
+  }
+  return [...new Set(entries)];
 }
 
 function optionalRegion(args) {
-  const region = optionalObject(args, 'region')
-  if (region === undefined) return undefined
-  const values = {}
-  for (const key of ['x', 'y', 'width', 'height']) {
-    const value = Number(region[key])
-    if (!Number.isFinite(value)) throw new Error(`region.${key} must be a finite number.`)
-    values[key] = value
+  const region = optionalObject(args, "region");
+  if (region === undefined) return undefined;
+  const values = {};
+  for (const key of ["x", "y", "width", "height"]) {
+    const value = Number(region[key]);
+    if (!Number.isFinite(value))
+      throw new Error(`region.${key} must be a finite number.`);
+    values[key] = value;
   }
-  if (values.width <= 0 || values.height <= 0) throw new Error('region.width and region.height must be greater than zero.')
-  return values
+  if (values.width <= 0 || values.height <= 0)
+    throw new Error(
+      "region.width and region.height must be greater than zero.",
+    );
+  return values;
 }
 
 function optionalFence(args) {
-  const within = optionalObject(args, 'within')
-  if (within === undefined) return undefined
-  const values = {}
-  for (const key of ['left', 'top', 'right', 'bottom']) {
-    const value = Number(within[key])
-    if (!Number.isFinite(value)) throw new Error(`within.${key} must be a finite number.`)
-    values[key] = value
+  const within = optionalObject(args, "within");
+  if (within === undefined) return undefined;
+  const values = {};
+  for (const key of ["left", "top", "right", "bottom"]) {
+    const value = Number(within[key]);
+    if (!Number.isFinite(value))
+      throw new Error(`within.${key} must be a finite number.`);
+    values[key] = value;
   }
-  return values
+  return values;
 }
 
 function optionalPoint(args, key) {
-  const point = optionalObject(args, key)
-  if (point === undefined) return undefined
-  const x = Number(point.x)
-  const y = Number(point.y)
-  if (!Number.isFinite(x) || !Number.isFinite(y)) throw new Error(`${key}.x and ${key}.y must be finite numbers.`)
-  return { x, y }
+  const point = optionalObject(args, key);
+  if (point === undefined) return undefined;
+  const x = Number(point.x);
+  const y = Number(point.y);
+  if (!Number.isFinite(x) || !Number.isFinite(y))
+    throw new Error(`${key}.x and ${key}.y must be finite numbers.`);
+  return { x, y };
 }
 
 function requiredPoint(args, key) {
-  const point = optionalPoint(args, key)
-  if (point === undefined) throw new Error(`Missing required parameter "${key}" (an object with x and y).`)
-  return point
+  const point = optionalPoint(args, key);
+  if (point === undefined)
+    throw new Error(
+      `Missing required parameter "${key}" (an object with x and y).`,
+    );
+  return point;
 }
 
 // ---------------------------------------------------------------------------
@@ -180,37 +303,79 @@ function requiredPoint(args, key) {
 
 /** Plan `auv_screenshot`; mirrors the CLI body's target exclusivity checks. */
 export function parseScreenshotArgs(rawArgs) {
-  const args = isPlainObject(rawArgs) ? rawArgs : {}
-  const windowId = optionalString(args, 'window_id')
-  const applicationId = optionalString(args, 'application_id')
-  const displayId = optionalString(args, 'display_id')
-  const region = optionalRegion(args)
-  const selected = [windowId, applicationId, displayId, region === undefined ? undefined : 'region'].filter((entry) => entry !== undefined)
+  const args = isPlainObject(rawArgs) ? rawArgs : {};
+  const windowId = optionalString(args, "window_id");
+  const applicationId = optionalString(args, "application_id");
+  const displayId = optionalString(args, "display_id");
+  const region = optionalRegion(args);
+  const selected = [
+    windowId,
+    applicationId,
+    displayId,
+    region === undefined ? undefined : "region",
+  ].filter((entry) => entry !== undefined);
   if (selected.length > 1) {
-    throw new Error('Pass only one of window_id, application_id, display_id, or region to auv_screenshot.')
+    throw new Error(
+      "Pass only one of window_id, application_id, display_id, or region to auv_screenshot.",
+    );
   }
   if (displayId !== undefined && region !== undefined) {
-    throw new Error('Pass either display_id or region to auv_screenshot, not both.')
+    throw new Error(
+      "Pass either display_id or region to auv_screenshot, not both.",
+    );
   }
-  return { windowId, applicationId, displayId, region }
+  return { windowId, applicationId, displayId, region };
 }
 
-/** Plan `auv_ocr` (findText / polled waitForText). */
+/**
+ * Plan `auv_ocr`.
+ *
+ * `mode: "find"` (default) locates one literal string; `mode: "read"` returns
+ * every recognized text region of the target. `region` restricts OCR to a
+ * screen rectangle (screen/display targets only), and `recognition_languages` /
+ * `custom_words` pass through to AUV's Vision OCR.
+ *
+ * @returns {{mode: 'find'|'read', text?: string, wait: boolean, timeoutMs?: number,
+ *            windowId?: string, applicationId?: string, displayId?: string,
+ *            region?: {x:number,y:number,width:number,height:number},
+ *            customWords?: string[], recognitionLanguages?: string[]}}
+ */
 export function parseOcrArgs(rawArgs) {
-  const args = isPlainObject(rawArgs) ? rawArgs : {}
-  const text = requiredString(args, 'text')
-  const wait = args.wait === true
-  const timeoutMs = optionalInteger(args, 'timeout_ms')
-  const windowId = optionalString(args, 'window_id')
-  const applicationId = optionalString(args, 'application_id')
-  if (timeoutMs !== undefined && !wait) throw new Error('timeout_ms is only valid with wait: true.')
+  const args = isPlainObject(rawArgs) ? rawArgs : {};
+  const mode = optionalEnum(args, "mode", ["find", "read"]) ?? "find";
+  const text = optionalString(args, "text");
+  if (mode === "find" && text === undefined) {
+    throw new Error(
+      'auv_ocr requires "text" to find, or mode: "read" to return all recognized text.',
+    );
+  }
+  const wait = args.wait === true;
+  if (wait && mode === "read") {
+    throw new Error(
+      'wait is only valid in mode "find"; mode "read" recognizes the current frame once.',
+    );
+  }
+  const timeoutMs = optionalInteger(args, "timeout_ms");
+  if (timeoutMs !== undefined && !wait)
+    throw new Error("timeout_ms is only valid with wait: true.");
   if (timeoutMs !== undefined && (timeoutMs < 100 || timeoutMs > 120_000)) {
-    throw new Error('timeout_ms must be between 100 and 120000.')
+    throw new Error("timeout_ms must be between 100 and 120000.");
   }
-  if (windowId !== undefined && applicationId !== undefined) {
-    throw new Error('Pass only one of window_id or application_id to auv_ocr.')
-  }
-  return { text, wait, timeoutMs, windowId, applicationId }
+  const target = parseCaptureTargetArgs(args, "auv_ocr");
+  const customWords = optionalStringArray(args, "custom_words");
+  const recognitionLanguages = optionalStringArray(
+    args,
+    "recognition_languages",
+  );
+  return {
+    mode,
+    text,
+    wait,
+    timeoutMs,
+    ...target,
+    customWords,
+    recognitionLanguages,
+  };
 }
 
 /**
@@ -222,56 +387,135 @@ export function parseOcrArgs(rawArgs) {
  * `display` (display-local; requires display_id). Unity/Canvas callers should
  * prefer `space: 'screen'` because window-targeted clicks are often ignored.
  *
- * @returns {{kind: 'text', text: string, windowId?: string, applicationId?: string, within?: object}
+ * `count`, `modifiers` and (for window delivery) `window_strategy` map to AUV
+ * `ClickOptions`; `window_strategy` is rejected for global screen/display
+ * clicks because the Runner accepts it only for window-targeted delivery.
+ *
+ * @returns {{kind: 'text', text: string, windowId?: string, applicationId?: string, within?: object,
+ *              count: number, modifiers?: string[], windowStrategy?: string}
  *          | {kind: 'point', x: number, y: number, space: 'screen'|'window'|'display',
- *              windowId?: string, applicationId?: string, displayId?: string, button?: string}}
+ *              windowId?: string, applicationId?: string, displayId?: string, button?: string,
+ *              count: number, modifiers?: string[], windowStrategy?: string}}
  */
 export function parseClickArgs(rawArgs) {
-  const args = isPlainObject(rawArgs) ? rawArgs : {}
-  const text = optionalString(args, 'text')
-  const x = optionalNumber(args, 'x')
-  const y = optionalNumber(args, 'y')
-  const windowId = optionalString(args, 'window_id')
-  const applicationId = optionalString(args, 'application_id')
-  const displayId = optionalString(args, 'display_id')
-  const button = optionalEnum(args, 'button', ['left', 'right', 'middle'])
-  const within = optionalFence(args)
-  const requestedSpace = optionalEnum(args, 'space', CLICK_SPACES)
+  const args = isPlainObject(rawArgs) ? rawArgs : {};
+  const text = optionalString(args, "text");
+  const x = optionalNumber(args, "x");
+  const y = optionalNumber(args, "y");
+  const windowId = optionalString(args, "window_id");
+  const applicationId = optionalString(args, "application_id");
+  const displayId = optionalString(args, "display_id");
+  const button = optionalEnum(args, "button", ["left", "right", "middle"]);
+  const within = optionalFence(args);
+  const requestedSpace = optionalEnum(args, "space", CLICK_SPACES);
+  const count = optionalBoundedInteger(args, "count", 1, 1, MAX_CLICK_COUNT);
+  const modifiers = optionalEnumArray(args, "modifiers", CLICK_MODIFIERS);
+  const windowStrategy = optionalEnum(
+    args,
+    "window_strategy",
+    WINDOW_CLICK_STRATEGIES,
+  );
   if (windowId !== undefined && applicationId !== undefined) {
-    throw new Error('Pass only one of window_id or application_id to auv_click.')
+    throw new Error(
+      "Pass only one of window_id or application_id to auv_click.",
+    );
   }
 
   if (text !== undefined) {
-    if (x !== undefined || y !== undefined) throw new Error('Pass either "text" or both "x" and "y" to auv_click, not both forms.')
-    if (button !== undefined && button !== 'left') throw new Error('button applies only to x/y clicks; OCR text clicks use the left button.')
-    if (displayId !== undefined) throw new Error('display_id cannot be used with OCR text clicks. Omit it, or pass x and y for a display click.')
-    if (requestedSpace !== undefined) throw new Error('space applies only to x/y clicks; OCR text clicks use the matched bounds.')
-    if (within !== undefined && (windowId !== undefined || applicationId !== undefined)) {
-      throw new Error('within is only supported for screen-wide OCR clicks; omit window_id and application_id when using within.')
+    if (x !== undefined || y !== undefined)
+      throw new Error(
+        'Pass either "text" or both "x" and "y" to auv_click, not both forms.',
+      );
+    if (button !== undefined && button !== "left")
+      throw new Error(
+        "button applies only to x/y clicks; OCR text clicks use the left button.",
+      );
+    if (displayId !== undefined)
+      throw new Error(
+        "display_id cannot be used with OCR text clicks. Omit it, or pass x and y for a display click.",
+      );
+    if (requestedSpace !== undefined)
+      throw new Error(
+        "space applies only to x/y clicks; OCR text clicks use the matched bounds.",
+      );
+    if (
+      within !== undefined &&
+      (windowId !== undefined || applicationId !== undefined)
+    ) {
+      throw new Error(
+        "within is only supported for screen-wide OCR clicks; omit window_id and application_id when using within.",
+      );
     }
-    return { kind: 'text', text, windowId, applicationId, within, allowRepeat: args.allow_repeat === true }
+    if (
+      windowStrategy !== undefined &&
+      windowId === undefined &&
+      applicationId === undefined
+    ) {
+      throw new Error(
+        "window_strategy requires a window_id or application_id target; a screen-wide text click is a global click.",
+      );
+    }
+    return {
+      kind: "text",
+      text,
+      windowId,
+      applicationId,
+      within,
+      count,
+      modifiers,
+      windowStrategy,
+      allowRepeat: args.allow_repeat === true,
+    };
   }
 
   if (x === undefined || y === undefined) {
-    throw new Error('auv_click requires either "text" or both "x" and "y".')
+    throw new Error('auv_click requires either "text" or both "x" and "y".');
   }
-  if (within !== undefined) throw new Error('within applies only to OCR text clicks; omit it for x/y clicks.')
-  if (displayId !== undefined && windowId !== undefined) throw new Error('Pass only one of window_id or display_id to auv_click.')
-  const space = requestedSpace ?? (windowId !== undefined || applicationId !== undefined ? 'window' : 'screen')
-  if (space === 'window' && windowId === undefined && applicationId === undefined) {
-    throw new Error('space: "window" requires window_id or application_id so AUV can interpret x/y in window coordinates.')
+  if (within !== undefined)
+    throw new Error(
+      "within applies only to OCR text clicks; omit it for x/y clicks.",
+    );
+  if (displayId !== undefined && windowId !== undefined)
+    throw new Error("Pass only one of window_id or display_id to auv_click.");
+  const space =
+    requestedSpace ??
+    (windowId !== undefined || applicationId !== undefined
+      ? "window"
+      : "screen");
+  if (
+    space === "window" &&
+    windowId === undefined &&
+    applicationId === undefined
+  ) {
+    throw new Error(
+      'space: "window" requires window_id or application_id so AUV can interpret x/y in window coordinates.',
+    );
   }
-  if (space === 'display' && displayId === undefined) {
-    throw new Error('space: "display" requires display_id so AUV can interpret x/y in display coordinates.')
+  if (space === "display" && displayId === undefined) {
+    throw new Error(
+      'space: "display" requires display_id so AUV can interpret x/y in display coordinates.',
+    );
   }
-  if (space === 'display' && (windowId !== undefined || applicationId !== undefined)) {
-    throw new Error('Pass either a window/application target or display_id with space: "display", not both.')
+  if (
+    space === "display" &&
+    (windowId !== undefined || applicationId !== undefined)
+  ) {
+    throw new Error(
+      'Pass either a window/application target or display_id with space: "display", not both.',
+    );
   }
-  if (space === 'window' && displayId !== undefined) {
-    throw new Error('display_id is not valid with space: "window"; pass space: "display" for display-local points.')
+  if (space === "window" && displayId !== undefined) {
+    throw new Error(
+      'display_id is not valid with space: "window"; pass space: "display" for display-local points.',
+    );
+  }
+  if (windowStrategy !== undefined && space !== "window") {
+    throw new Error(
+      'window_strategy applies only to window-targeted clicks; use window_id/application_id with space: "window".',
+    );
   }
   return {
-    kind: 'point',
+    kind: "point",
     x,
     y,
     space,
@@ -279,93 +523,241 @@ export function parseClickArgs(rawArgs) {
     applicationId,
     displayId,
     button,
+    count,
+    modifiers,
+    windowStrategy,
     allowRepeat: args.allow_repeat === true,
-  }
+  };
 }
 
 /** Plan `auv_type`. */
 export function parseTypeArgs(rawArgs) {
-  const args = isPlainObject(rawArgs) ? rawArgs : {}
-  const text = requiredString(args, 'text')
-  const mode = optionalEnum(args, 'mode', ['type', 'paste']) ?? 'type'
-  const policy = optionalEnum(args, 'policy', ['background-only', 'background-preferred', 'foreground-preferred'])
-  const windowId = optionalString(args, 'window_id')
-  const applicationId = optionalString(args, 'application_id')
-  if (windowId !== undefined && applicationId !== undefined) {
-    throw new Error('Pass only one of window_id or application_id to auv_type.')
+  const args = isPlainObject(rawArgs) ? rawArgs : {};
+  const text = requiredString(args, "text");
+  const mode = optionalEnum(args, "mode", ["type", "paste"]) ?? "type";
+  const policy = optionalEnum(args, "policy", [
+    "background-only",
+    "background-preferred",
+    "foreground-preferred",
+  ]);
+  const windowId = optionalString(args, "window_id");
+  const applicationId = optionalString(args, "application_id");
+  const submit = optionalEnum(args, "submit", TEXT_SUBMITS);
+  if (
+    args.replace_existing !== undefined &&
+    typeof args.replace_existing !== "boolean"
+  ) {
+    throw new Error('Parameter "replace_existing" must be a boolean.');
   }
-  return { text, mode, policy, windowId, applicationId, allowRepeat: args.allow_repeat === true }
+  if (windowId !== undefined && applicationId !== undefined) {
+    throw new Error(
+      "Pass only one of window_id or application_id to auv_type.",
+    );
+  }
+  return {
+    text,
+    mode,
+    policy,
+    windowId,
+    applicationId,
+    submit,
+    replaceExisting: args.replace_existing === true,
+    allowRepeat: args.allow_repeat === true,
+  };
 }
 
 /** Plan `auv_keys`. */
 export function parseKeysArgs(rawArgs) {
-  const args = isPlainObject(rawArgs) ? rawArgs : {}
-  const rawKeys = args.keys
-  const keys = Array.isArray(rawKeys) ? rawKeys.filter((key) => typeof key === 'string' && key !== '') : []
-  if (keys.length === 0) throw new Error('auv_keys requires "keys" as a non-empty array of key names, for example ["ctrl","l"].')
-  const repeat = optionalInteger(args, 'repeat')
-  if (repeat !== undefined && (repeat < 1 || repeat > 255)) throw new Error('repeat must be between 1 and 255.')
-  const intervalMs = optionalInteger(args, 'interval_ms')
-  if (intervalMs !== undefined && intervalMs < 1) throw new Error('interval_ms must be a positive integer.')
+  const args = isPlainObject(rawArgs) ? rawArgs : {};
+  const rawKeys = args.keys;
+  const keys = Array.isArray(rawKeys)
+    ? rawKeys.filter((key) => typeof key === "string" && key !== "")
+    : [];
+  if (keys.length === 0)
+    throw new Error(
+      'auv_keys requires "keys" as a non-empty array of key names, for example ["ctrl","l"].',
+    );
+  const repeat = optionalInteger(args, "repeat");
+  if (repeat !== undefined && (repeat < 1 || repeat > 255))
+    throw new Error("repeat must be between 1 and 255.");
+  const intervalMs = optionalInteger(args, "interval_ms");
+  if (intervalMs !== undefined && intervalMs < 1)
+    throw new Error("interval_ms must be a positive integer.");
+  const holdMs = optionalInteger(args, "hold_ms");
+  if (holdMs !== undefined) {
+    if (holdMs < 1 || holdMs > MAX_HOLD_MS)
+      throw new Error(`hold_ms must be between 1 and ${MAX_HOLD_MS}.`);
+    if (repeat !== undefined)
+      throw new Error(
+        "hold_ms cannot be combined with repeat: a hold is one press and release.",
+      );
+    if (intervalMs !== undefined)
+      throw new Error(
+        "interval_ms only applies to repeated presses, not to a hold.",
+      );
+  }
   if (repeat === undefined || repeat <= 1) {
-    if (intervalMs !== undefined) throw new Error('interval_ms is only valid with repeat greater than 1.')
+    if (intervalMs !== undefined)
+      throw new Error("interval_ms is only valid with repeat greater than 1.");
   }
-  const windowId = optionalString(args, 'window_id')
-  const applicationId = optionalString(args, 'application_id')
+  const windowId = optionalString(args, "window_id");
+  const applicationId = optionalString(args, "application_id");
   if (windowId !== undefined && applicationId !== undefined) {
-    throw new Error('Pass only one of window_id or application_id to auv_keys.')
+    throw new Error(
+      "Pass only one of window_id or application_id to auv_keys.",
+    );
   }
-  const policy = optionalEnum(args, 'policy', KEY_POLICIES)
-  const targeted = windowId !== undefined || applicationId !== undefined
-  if (args.focus !== undefined && typeof args.focus !== 'boolean') throw new Error('Parameter "focus" must be a boolean.')
-  const focus = args.focus === undefined ? targeted : args.focus
-  if (focus && !targeted) throw new Error('focus: true requires a window_id or application_id target; omit focus to press keys into the foreground app.')
-  if (policy !== undefined && policy !== 'foreground-preferred' && !targeted) {
-    throw new Error(`policy "${policy}" requires a window_id or application_id target; omit policy to deliver keys to the foreground app.`)
+  const policy = optionalEnum(args, "policy", KEY_POLICIES);
+  const targeted = windowId !== undefined || applicationId !== undefined;
+  if (args.focus !== undefined && typeof args.focus !== "boolean")
+    throw new Error('Parameter "focus" must be a boolean.');
+  const focus = args.focus === undefined ? targeted : args.focus;
+  if (focus && !targeted)
+    throw new Error(
+      "focus: true requires a window_id or application_id target; omit focus to press keys into the foreground app.",
+    );
+  if (policy !== undefined && policy !== "foreground-preferred" && !targeted) {
+    throw new Error(
+      `policy "${policy}" requires a window_id or application_id target; omit policy to deliver keys to the foreground app.`,
+    );
   }
   return {
     keys,
     repeat,
     intervalMs,
+    holdMs,
     windowId,
     applicationId,
     policy,
     focus,
     allowRepeat: args.allow_repeat === true,
-  }
+  };
 }
 
 /** Plan `auv_scroll`. The macOS screen-point rejection happens in the SDK op. */
 export function parseScrollArgs(rawArgs) {
-  const args = isPlainObject(rawArgs) ? rawArgs : {}
-  const dy = optionalNumber(args, 'dy')
-  if (dy === undefined) throw new Error('auv_scroll requires "dy", the vertical delta in logical pixels (positive scrolls down).')
-  const dx = optionalNumber(args, 'dx')
-  const windowId = optionalString(args, 'window_id')
-  const x = optionalNumber(args, 'x')
-  const y = optionalNumber(args, 'y')
+  const args = isPlainObject(rawArgs) ? rawArgs : {};
+  const dy = optionalNumber(args, "dy");
+  if (dy === undefined)
+    throw new Error(
+      'auv_scroll requires "dy", the vertical delta in logical pixels (positive scrolls down).',
+    );
+  const dx = optionalNumber(args, "dx");
+  const windowId = optionalString(args, "window_id");
+  const x = optionalNumber(args, "x");
+  const y = optionalNumber(args, "y");
   if (windowId === undefined && (x === undefined || y === undefined)) {
-    throw new Error('auv_scroll requires "window_id", or both "x" and "y" screen coordinates. On macOS AUV cannot scroll at a raw screen point, so prefer window_id.')
+    throw new Error(
+      'auv_scroll requires "window_id", or both "x" and "y" screen coordinates. On macOS AUV cannot scroll at a raw screen point, so prefer window_id.',
+    );
   }
   if (windowId !== undefined && (x === undefined) !== (y === undefined)) {
-    throw new Error('Pass both window-local x and y, or neither (the window center is used).')
+    throw new Error(
+      "Pass both window-local x and y, or neither (the window center is used).",
+    );
   }
-  return { dy, dx, windowId, x, y, allowRepeat: args.allow_repeat === true }
+  if (args.smooth !== undefined && typeof args.smooth !== "boolean")
+    throw new Error('Parameter "smooth" must be a boolean.');
+  const smooth = args.smooth === true;
+  const untilText = optionalString(args, "until_text");
+  if ((smooth || untilText !== undefined) && windowId === undefined) {
+    throw new Error(
+      "smooth and until_text require window_id: AUV animates and observes scrolling inside a window only.",
+    );
+  }
+  if (untilText !== undefined) {
+    if (dy !== 0 && dx !== undefined && dx !== 0) {
+      throw new Error(
+        "until_text scrolls along one axis: pass dy or dx, not both non-zero.",
+      );
+    }
+    if (dy === 0 && (dx === undefined || dx === 0)) {
+      throw new Error("until_text needs a non-zero dy or dx scroll step.");
+    }
+  }
+  return {
+    dy,
+    dx,
+    windowId,
+    x,
+    y,
+    untilText,
+    smooth,
+    allowRepeat: args.allow_repeat === true,
+  };
 }
 
 /** Plan `auv_windows`. */
 export function parseWindowsArgs(rawArgs) {
-  const args = isPlainObject(rawArgs) ? rawArgs : {}
+  const args = isPlainObject(rawArgs) ? rawArgs : {};
   return {
     includeMinimized: args.include_minimized === true,
     includeOtherDesktops: args.include_other_desktops === true,
-  }
+  };
 }
 
 /** Plan `auv_activate`. */
 export function parseActivateArgs(rawArgs) {
-  const args = isPlainObject(rawArgs) ? rawArgs : {}
-  return { applicationId: requiredString(args, 'application_id') }
+  const args = isPlainObject(rawArgs) ? rawArgs : {};
+  return { applicationId: requiredString(args, "application_id") };
+}
+
+/**
+ * Plan `auv_window`.
+ *
+ * `action` is required. `frame` is only valid with `action: "set_frame"` and
+ * takes at least one of x/y (both together) or width/height (both together).
+ *
+ * @returns {{windowId: string, action: string, frame?: {x?: number, y?: number, width?: number, height?: number}}}
+ */
+export function parseWindowArgs(rawArgs) {
+  const args = isPlainObject(rawArgs) ? rawArgs : {};
+  const windowId = requiredString(args, "window_id");
+  const action = optionalEnum(args, "action", WINDOW_ACTIONS);
+  if (action === undefined) {
+    throw new Error(
+      `auv_window requires "action": ${WINDOW_ACTIONS.map((entry) => `"${entry}"`).join(", ")}.`,
+    );
+  }
+  const frame = optionalObject(args, "frame");
+  if (action !== "set_frame") {
+    if (frame !== undefined)
+      throw new Error('frame is only valid with action: "set_frame".');
+    return { windowId, action };
+  }
+  if (frame === undefined) {
+    throw new Error(
+      'action: "set_frame" requires a frame with at least one of the pairs x/y or width/height.',
+    );
+  }
+  const parsed = {};
+  for (const key of ["x", "y", "width", "height"])
+    parsed[key] = optionalNumber(frame, key);
+  if ((parsed.x === undefined) !== (parsed.y === undefined)) {
+    throw new Error(
+      "frame.x and frame.y must be passed together to move a window.",
+    );
+  }
+  if ((parsed.width === undefined) !== (parsed.height === undefined)) {
+    throw new Error(
+      "frame.width and frame.height must be passed together to resize a window.",
+    );
+  }
+  if (parsed.x === undefined && parsed.width === undefined) {
+    throw new Error(
+      'action: "set_frame" requires frame.x/frame.y, frame.width/frame.height, or both.',
+    );
+  }
+  if (parsed.width !== undefined && parsed.width <= 0)
+    throw new Error("frame.width must be greater than zero.");
+  if (parsed.height !== undefined && parsed.height <= 0)
+    throw new Error("frame.height must be greater than zero.");
+  return { windowId, action, frame: parsed };
+}
+
+/** Plan `auv_displays` (no parameters). */
+export function parseDisplaysArgs() {
+  return {};
 }
 
 /**
@@ -379,38 +771,70 @@ export function parseActivateArgs(rawArgs) {
  *            activate: boolean, allowRepeat: boolean}}
  */
 export function parseDragArgs(rawArgs) {
-  const args = isPlainObject(rawArgs) ? rawArgs : {}
-  const from = requiredPoint(args, 'from')
-  const to = requiredPoint(args, 'to')
-  const windowId = optionalString(args, 'window_id')
-  const applicationId = optionalString(args, 'application_id')
-  const displayId = optionalString(args, 'display_id')
-  const button = optionalEnum(args, 'button', MOUSE_BUTTONS) ?? 'left'
-  const durationMs = optionalInteger(args, 'duration_ms') ?? DEFAULT_DRAG_DURATION_MS
+  const args = isPlainObject(rawArgs) ? rawArgs : {};
+  const from = requiredPoint(args, "from");
+  const to = requiredPoint(args, "to");
+  const windowId = optionalString(args, "window_id");
+  const applicationId = optionalString(args, "application_id");
+  const displayId = optionalString(args, "display_id");
+  const button = optionalEnum(args, "button", MOUSE_BUTTONS) ?? "left";
+  const durationMs =
+    optionalInteger(args, "duration_ms") ?? DEFAULT_DRAG_DURATION_MS;
   if (durationMs < 0 || durationMs > MAX_DRAG_DURATION_MS) {
-    throw new Error(`duration_ms must be between 0 and ${MAX_DRAG_DURATION_MS}.`)
+    throw new Error(
+      `duration_ms must be between 0 and ${MAX_DRAG_DURATION_MS}.`,
+    );
   }
   if (windowId !== undefined && applicationId !== undefined) {
-    throw new Error('Pass only one of window_id or application_id to auv_drag.')
+    throw new Error(
+      "Pass only one of window_id or application_id to auv_drag.",
+    );
   }
-  if ((windowId !== undefined || applicationId !== undefined) && displayId !== undefined) {
-    throw new Error('Pass either a window/application target or display_id to auv_drag, not both.')
+  if (
+    (windowId !== undefined || applicationId !== undefined) &&
+    displayId !== undefined
+  ) {
+    throw new Error(
+      "Pass either a window/application target or display_id to auv_drag, not both.",
+    );
   }
-  const targeted = windowId !== undefined || applicationId !== undefined
-  const inferredSpace = targeted ? 'window' : displayId !== undefined ? 'display' : 'screen'
-  const space = optionalEnum(args, 'space', DRAG_SPACES) ?? inferredSpace
-  if (space === 'window' && !targeted) {
-    throw new Error('space: "window" requires window_id or application_id so AUV can convert window-local points to screen points.')
+  const targeted = windowId !== undefined || applicationId !== undefined;
+  const inferredSpace = targeted
+    ? "window"
+    : displayId !== undefined
+      ? "display"
+      : "screen";
+  const space = optionalEnum(args, "space", DRAG_SPACES) ?? inferredSpace;
+  if (space === "window" && !targeted) {
+    throw new Error(
+      'space: "window" requires window_id or application_id so AUV can convert window-local points to screen points.',
+    );
   }
-  if (space === 'display' && displayId === undefined) {
-    throw new Error('space: "display" requires display_id so AUV can convert display-local points to screen points.')
+  if (space === "display" && displayId === undefined) {
+    throw new Error(
+      'space: "display" requires display_id so AUV can convert display-local points to screen points.',
+    );
   }
-  if (space !== 'display' && displayId !== undefined) {
-    throw new Error('display_id is only valid with space: "display" (or omit space and let it be inferred); pass a window target for window-space drags.')
+  if (space !== "display" && displayId !== undefined) {
+    throw new Error(
+      'display_id is only valid with space: "display" (or omit space and let it be inferred); pass a window target for window-space drags.',
+    );
   }
-  if (args.activate !== undefined && typeof args.activate !== 'boolean') throw new Error('Parameter "activate" must be a boolean.')
-  const activate = args.activate === undefined ? targeted : args.activate
-  return { from, to, space, windowId, applicationId, displayId, button, durationMs, activate, allowRepeat: args.allow_repeat === true }
+  if (args.activate !== undefined && typeof args.activate !== "boolean")
+    throw new Error('Parameter "activate" must be a boolean.');
+  const activate = args.activate === undefined ? targeted : args.activate;
+  return {
+    from,
+    to,
+    space,
+    windowId,
+    applicationId,
+    displayId,
+    button,
+    durationMs,
+    activate,
+    allowRepeat: args.allow_repeat === true,
+  };
 }
 
 /**
@@ -418,26 +842,38 @@ export function parseDragArgs(rawArgs) {
  * `auv_capture_state`.
  */
 function parseCaptureTargetArgs(rawArgs, toolName) {
-  const args = isPlainObject(rawArgs) ? rawArgs : {}
-  const windowId = optionalString(args, 'window_id')
-  const applicationId = optionalString(args, 'application_id')
-  const displayId = optionalString(args, 'display_id')
-  const region = optionalRegion(args)
+  const args = isPlainObject(rawArgs) ? rawArgs : {};
+  const windowId = optionalString(args, "window_id");
+  const applicationId = optionalString(args, "application_id");
+  const displayId = optionalString(args, "display_id");
+  const region = optionalRegion(args);
   if (windowId !== undefined && applicationId !== undefined) {
-    throw new Error(`Pass only one of window_id or application_id to ${toolName}.`)
+    throw new Error(
+      `Pass only one of window_id or application_id to ${toolName}.`,
+    );
   }
-  if (displayId !== undefined && (windowId !== undefined || applicationId !== undefined)) {
-    throw new Error(`Pass either a window/application target or display_id to ${toolName}, not both.`)
+  if (
+    displayId !== undefined &&
+    (windowId !== undefined || applicationId !== undefined)
+  ) {
+    throw new Error(
+      `Pass either a window/application target or display_id to ${toolName}, not both.`,
+    );
   }
-  if (region !== undefined && (windowId !== undefined || applicationId !== undefined)) {
-    throw new Error(`region is only supported for screen/display targets; omit window_id and application_id when using region in ${toolName}.`)
+  if (
+    region !== undefined &&
+    (windowId !== undefined || applicationId !== undefined)
+  ) {
+    throw new Error(
+      `region is only supported for screen/display targets; omit window_id and application_id when using region in ${toolName}.`,
+    );
   }
-  return { windowId, applicationId, displayId, region }
+  return { windowId, applicationId, displayId, region };
 }
 
 /** Plan `auv_capture_state` (target only; the frame is stored in memory). */
 export function parseCaptureStateArgs(rawArgs) {
-  return parseCaptureTargetArgs(rawArgs, 'auv_capture_state')
+  return parseCaptureTargetArgs(rawArgs, "auv_capture_state");
 }
 
 /**
@@ -453,24 +889,55 @@ export function parseCaptureStateArgs(rawArgs) {
  *            baselineHash?: string, minChangedRatio: number, pixelThreshold: number}}
  */
 export function parseWaitForChangeArgs(rawArgs) {
-  const args = isPlainObject(rawArgs) ? rawArgs : {}
-  const target = parseCaptureTargetArgs(args, 'auv_wait_for_change')
-  const timeoutMs = optionalInteger(args, 'timeout_ms') ?? DEFAULT_WAIT_TIMEOUT_MS
+  const args = isPlainObject(rawArgs) ? rawArgs : {};
+  const target = parseCaptureTargetArgs(args, "auv_wait_for_change");
+  const timeoutMs =
+    optionalInteger(args, "timeout_ms") ?? DEFAULT_WAIT_TIMEOUT_MS;
   if (timeoutMs < MIN_WAIT_TIMEOUT_MS || timeoutMs > MAX_WAIT_TIMEOUT_MS) {
-    throw new Error(`timeout_ms must be between ${MIN_WAIT_TIMEOUT_MS} and ${MAX_WAIT_TIMEOUT_MS}.`)
+    throw new Error(
+      `timeout_ms must be between ${MIN_WAIT_TIMEOUT_MS} and ${MAX_WAIT_TIMEOUT_MS}.`,
+    );
   }
-  const intervalMs = optionalInteger(args, 'interval_ms') ?? DEFAULT_WAIT_INTERVAL_MS
+  const intervalMs =
+    optionalInteger(args, "interval_ms") ?? DEFAULT_WAIT_INTERVAL_MS;
   if (intervalMs < MIN_WAIT_INTERVAL_MS || intervalMs > MAX_WAIT_INTERVAL_MS) {
-    throw new Error(`interval_ms must be between ${MIN_WAIT_INTERVAL_MS} and ${MAX_WAIT_INTERVAL_MS}.`)
+    throw new Error(
+      `interval_ms must be between ${MIN_WAIT_INTERVAL_MS} and ${MAX_WAIT_INTERVAL_MS}.`,
+    );
   }
-  const stateToken = optionalString(args, 'state_token')
-  const baselineHash = optionalString(args, 'baseline_hash')
-  if (baselineHash !== undefined && !/^(thumbhash|sha256):[0-9a-f]+$/i.test(baselineHash)) {
-    throw new Error('baseline_hash must look like "thumbhash:<hex>" or "sha256:<hex>", copied from an earlier before_hash/after_hash.')
+  const stateToken = optionalString(args, "state_token");
+  const baselineHash = optionalString(args, "baseline_hash");
+  if (
+    baselineHash !== undefined &&
+    !/^(thumbhash|sha256):[0-9a-f]+$/i.test(baselineHash)
+  ) {
+    throw new Error(
+      'baseline_hash must look like "thumbhash:<hex>" or "sha256:<hex>", copied from an earlier before_hash/after_hash.',
+    );
   }
-  const minChangedRatio = optionalBoundedNumber(args, 'min_changed_ratio', DEFAULT_MIN_CHANGED_RATIO, 0, 1)
-  const pixelThreshold = optionalBoundedInteger(args, 'pixel_threshold', DEFAULT_PIXEL_THRESHOLD, 0, 255)
-  return { ...target, timeoutMs, intervalMs, stateToken, baselineHash, minChangedRatio, pixelThreshold }
+  const minChangedRatio = optionalBoundedNumber(
+    args,
+    "min_changed_ratio",
+    DEFAULT_MIN_CHANGED_RATIO,
+    0,
+    1,
+  );
+  const pixelThreshold = optionalBoundedInteger(
+    args,
+    "pixel_threshold",
+    DEFAULT_PIXEL_THRESHOLD,
+    0,
+    255,
+  );
+  return {
+    ...target,
+    timeoutMs,
+    intervalMs,
+    stateToken,
+    baselineHash,
+    minChangedRatio,
+    pixelThreshold,
+  };
 }
 
 /** A plain target description stored alongside a capture-state snapshot. */
@@ -482,21 +949,28 @@ export function captureTargetPlan(plan = {}) {
     region:
       plan.region === undefined
         ? undefined
-        : { x: plan.region.x, y: plan.region.y, width: plan.region.width, height: plan.region.height },
-  }
+        : {
+            x: plan.region.x,
+            y: plan.region.y,
+            width: plan.region.width,
+            height: plan.region.height,
+          },
+  };
 }
 
 /** Stable string identity for a capture target, for diagnostics/LRU keys. */
 export function captureTargetKey(plan = {}) {
-  const target = captureTargetPlan(plan)
-  if (target.windowId !== undefined) return `window:${target.windowId}`
-  if (target.applicationId !== undefined) return `app:${target.applicationId}`
+  const target = captureTargetPlan(plan);
+  if (target.windowId !== undefined) return `window:${target.windowId}`;
+  if (target.applicationId !== undefined) return `app:${target.applicationId}`;
   if (target.region !== undefined) {
-    const region = `${target.region.x},${target.region.y},${target.region.width},${target.region.height}`
-    return target.displayId === undefined ? `region:${region}` : `region:${region}:display:${target.displayId}`
+    const region = `${target.region.x},${target.region.y},${target.region.width},${target.region.height}`;
+    return target.displayId === undefined
+      ? `region:${region}`
+      : `region:${region}:display:${target.displayId}`;
   }
-  if (target.displayId !== undefined) return `display:${target.displayId}`
-  return 'screen'
+  if (target.displayId !== undefined) return `display:${target.displayId}`;
+  return "screen";
 }
 
 // ---------------------------------------------------------------------------
@@ -505,7 +979,10 @@ export function captureTargetKey(plan = {}) {
 
 /** camelCase -> snake_case for protobuf field names. */
 export function snakeCase(key) {
-  return String(key).replace(/[A-Z]/g, (character) => `_${character.toLowerCase()}`)
+  return String(key).replace(
+    /[A-Z]/g,
+    (character) => `_${character.toLowerCase()}`,
+  );
 }
 
 /**
@@ -514,193 +991,388 @@ export function snakeCase(key) {
  * bigint values.
  */
 export function normalizeMessage(value) {
-  if (value === null || value === undefined) return null
-  if (typeof value === 'bigint') return value.toString()
-  if (value instanceof Uint8Array) return { byte_length: value.byteLength }
-  if (Array.isArray(value)) return value.map(normalizeMessage)
-  if (typeof value !== 'object') return value
-  const output = {}
+  if (value === null || value === undefined) return null;
+  if (typeof value === "bigint") return value.toString();
+  if (value instanceof Uint8Array) return { byte_length: value.byteLength };
+  if (Array.isArray(value)) return value.map(normalizeMessage);
+  if (typeof value !== "object") return value;
+  const output = {};
   for (const [key, entry] of Object.entries(value)) {
-    if (key === '$typeName') continue
-    output[snakeCase(key)] = normalizeMessage(entry)
+    if (key === "$typeName") continue;
+    output[snakeCase(key)] = normalizeMessage(entry);
   }
-  return output
+  return output;
 }
 
 /** A `ScreenRect`-like object -> `{origin:{x,y}, size:{width,height}}` (CLI receipt shape). */
 export function mapRect(rect) {
-  if (rect === null || rect === undefined || typeof rect !== 'object') return null
-  const x = Number(rect.x)
-  const y = Number(rect.y)
-  const width = Number(rect.width)
-  const height = Number(rect.height)
-  if (![x, y, width, height].every((value) => Number.isFinite(value))) return null
-  return { origin: { x, y }, size: { width, height } }
+  if (rect === null || rect === undefined || typeof rect !== "object")
+    return null;
+  const x = Number(rect.x);
+  const y = Number(rect.y);
+  const width = Number(rect.width);
+  const height = Number(rect.height);
+  if (![x, y, width, height].every((value) => Number.isFinite(value)))
+    return null;
+  return { origin: { x, y }, size: { width, height } };
 }
 
 /** Map one SDK `Window` + its id to the CLI `window.list` row shape. */
 export function mapWindowRow(window, id) {
-  const source = window !== null && typeof window === 'object' ? window : {}
-  const state = source.state !== null && typeof source.state === 'object' ? source.state : {}
-  const desktop = state.desktop !== null && typeof state.desktop === 'object' ? state.desktop : null
+  const source = window !== null && typeof window === "object" ? window : {};
+  const state =
+    source.state !== null && typeof source.state === "object"
+      ? source.state
+      : {};
+  const desktop =
+    state.desktop !== null && typeof state.desktop === "object"
+      ? state.desktop
+      : null;
   return {
-    app_name: typeof source.applicationName === 'string' && source.applicationName !== '' ? source.applicationName : null,
-    application_id: typeof source.applicationId === 'string' && source.applicationId !== '' ? source.applicationId : null,
-    coordinate_space: 'screen',
+    app_name:
+      typeof source.applicationName === "string" &&
+      source.applicationName !== ""
+        ? source.applicationName
+        : null,
+    application_id:
+      typeof source.applicationId === "string" && source.applicationId !== ""
+        ? source.applicationId
+        : null,
+    coordinate_space: "screen",
     frame: mapRect(source.frame),
     is_main: source.isMain === true,
     is_visible: source.isVisible === true,
-    process_id: Number.isFinite(Number(source.processId)) ? Number(source.processId) : null,
-    reference: { id: typeof id === 'string' && id !== '' ? id : String(source.ref?.windowId ?? '') },
+    process_id: Number.isFinite(Number(source.processId))
+      ? Number(source.processId)
+      : null,
+    reference: {
+      id:
+        typeof id === "string" && id !== ""
+          ? id
+          : String(source.ref?.windowId ?? ""),
+    },
     state: {
-      desktop: desktop === null ? null : typeof desktop.id === 'string' && desktop.id !== '' ? desktop.id : null,
+      desktop:
+        desktop === null
+          ? null
+          : typeof desktop.id === "string" && desktop.id !== ""
+            ? desktop.id
+            : null,
       is_always_on_top: state.isAlwaysOnTop === true,
       is_focused: state.isFocused === true,
       is_fullscreen: state.isFullscreen === true,
       is_maximized: state.isMaximized === true,
       is_minimized: state.isMinimized === true,
       is_visible: state.isVisible === true,
-      stack_index: Number.isFinite(Number(state.stackIndex)) ? Number(state.stackIndex) : null,
+      stack_index: Number.isFinite(Number(state.stackIndex))
+        ? Number(state.stackIndex)
+        : null,
     },
-    title: typeof source.title === 'string' && source.title !== '' ? source.title : null,
-  }
+    title:
+      typeof source.title === "string" && source.title !== ""
+        ? source.title
+        : null,
+  };
 }
 
 /** Map an SDK `Display` to the CLI `display.list`/`display.capture` shape. */
 export function mapDisplay(display) {
-  if (display === null || display === undefined || typeof display !== 'object') return null
+  if (display === null || display === undefined || typeof display !== "object")
+    return null;
   return {
-    coordinate_space: 'screen',
+    coordinate_space: "screen",
     frame: mapRect(display.frame),
-    id: typeof display.displayId === 'string' ? display.displayId : String(display.displayId ?? ''),
+    id:
+      typeof display.displayId === "string"
+        ? display.displayId
+        : String(display.displayId ?? ""),
     is_builtin: display.builtin === true,
     is_primary: display.primary === true,
-    name: typeof display.name === 'string' && display.name !== '' ? display.name : null,
+    name:
+      typeof display.name === "string" && display.name !== ""
+        ? display.name
+        : null,
     scale_factor: Number(display.scaleFactor),
-  }
+  };
 }
 
 /** Map a `CapturedFrame` to the CLI `result.capture` shape (pixel dimensions from the frame when present). */
 export function mapCapturedFrame(capture) {
-  if (capture === null || capture === undefined || typeof capture !== 'object') return null
-  const pixelSize = capture.pixelSize !== null && typeof capture.pixelSize === 'object' ? capture.pixelSize : null
-  const pixelWidth = Number(pixelSize?.width)
-  const pixelHeight = Number(pixelSize?.height)
+  if (capture === null || capture === undefined || typeof capture !== "object")
+    return null;
+  const pixelSize =
+    capture.pixelSize !== null && typeof capture.pixelSize === "object"
+      ? capture.pixelSize
+      : null;
+  const pixelWidth = Number(pixelSize?.width);
+  const pixelHeight = Number(pixelSize?.height);
   return {
-    backend: typeof capture.backend === 'string' ? capture.backend : null,
+    backend: typeof capture.backend === "string" ? capture.backend : null,
     bounds: mapRect(capture.bounds),
-    fallback_reason: typeof capture.fallbackReason === 'string' && capture.fallbackReason !== '' ? capture.fallbackReason : null,
+    fallback_reason:
+      typeof capture.fallbackReason === "string" &&
+      capture.fallbackReason !== ""
+        ? capture.fallbackReason
+        : null,
     pixel_dimensions:
-      Number.isFinite(pixelWidth) && Number.isFinite(pixelHeight) && pixelWidth > 0 && pixelHeight > 0
+      Number.isFinite(pixelWidth) &&
+      Number.isFinite(pixelHeight) &&
+      pixelWidth > 0 &&
+      pixelHeight > 0
         ? { width: pixelWidth, height: pixelHeight }
         : null,
     scale_factor: Number(capture.scaleFactor),
-  }
+  };
 }
 
 /** Map an SDK `TextMatch` to the CLI `matches[]` shape. */
 export function mapTextMatch(match) {
-  if (match === null || match === undefined || typeof match !== 'object') return null
+  if (match === null || match === undefined || typeof match !== "object")
+    return null;
   return {
     bounds: mapRect(match.bounds),
-    confidence: Number.isFinite(Number(match.confidence)) ? Number(match.confidence) : null,
-    text: typeof match.text === 'string' ? match.text : String(match.text ?? ''),
-  }
+    confidence: Number.isFinite(Number(match.confidence))
+      ? Number(match.confidence)
+      : null,
+    text:
+      typeof match.text === "string" ? match.text : String(match.text ?? ""),
+  };
 }
 
 /** Map an SDK list of `TextMatch` values. */
 export function mapTextMatches(matches) {
-  return Array.isArray(matches) ? matches.map(mapTextMatch).filter((match) => match !== null) : []
+  return Array.isArray(matches)
+    ? matches.map(mapTextMatch).filter((match) => match !== null)
+    : [];
 }
 
-const APPLICATION_ID_KINDS = ['unspecified', 'bundle_id', 'process_name', 'desktop_app_id']
-const APPLICATION_ACTIVATION_METHODS = ['unspecified', 'apple_script_activate', 'foreground_window']
+const APPLICATION_ID_KINDS = [
+  "unspecified",
+  "bundle_id",
+  "process_name",
+  "desktop_app_id",
+];
+const APPLICATION_ACTIVATION_METHODS = [
+  "unspecified",
+  "apple_script_activate",
+  "foreground_window",
+];
 
 function enumName(names, value) {
-  const index = Number(value)
-  return Number.isInteger(index) && index >= 0 && index < names.length ? names[index] : null
+  const index = Number(value);
+  return Number.isInteger(index) && index >= 0 && index < names.length
+    ? names[index]
+    : null;
 }
 
 /** Map `ActivateApplicationResponse` to a CLI-like `result`. */
 export function mapActivateResult(response) {
-  if (response === null || response === undefined || typeof response !== 'object') return null
-  const normalized = normalizeMessage(response)
-  normalized.application_id_kind = enumName(APPLICATION_ID_KINDS, response.applicationIdKind)
-  normalized.method = enumName(APPLICATION_ACTIVATION_METHODS, response.method)
-  const verification = response.verification
-  const oneof = verification !== null && typeof verification === 'object' ? verification.verification : null
-  if (oneof !== null && typeof oneof === 'object' && typeof oneof.case === 'string') {
-    if (oneof.case === 'verifiedForeground') {
-      normalized.verification = { status: 'verified_foreground', observed_application_id: oneof.value?.observedApplicationId ?? null }
-    } else if (oneof.case === 'foregroundMismatch') {
-      normalized.verification = { status: 'foreground_mismatch', observed_application_id: oneof.value?.observedApplicationId ?? null }
-    } else if (oneof.case === 'unavailable') {
-      normalized.verification = { status: 'unavailable', reason: oneof.value?.reason ?? null }
+  if (
+    response === null ||
+    response === undefined ||
+    typeof response !== "object"
+  )
+    return null;
+  const normalized = normalizeMessage(response);
+  normalized.application_id_kind = enumName(
+    APPLICATION_ID_KINDS,
+    response.applicationIdKind,
+  );
+  normalized.method = enumName(APPLICATION_ACTIVATION_METHODS, response.method);
+  const verification = response.verification;
+  const oneof =
+    verification !== null && typeof verification === "object"
+      ? verification.verification
+      : null;
+  if (
+    oneof !== null &&
+    typeof oneof === "object" &&
+    typeof oneof.case === "string"
+  ) {
+    if (oneof.case === "verifiedForeground") {
+      normalized.verification = {
+        status: "verified_foreground",
+        observed_application_id: oneof.value?.observedApplicationId ?? null,
+      };
+    } else if (oneof.case === "foregroundMismatch") {
+      normalized.verification = {
+        status: "foreground_mismatch",
+        observed_application_id: oneof.value?.observedApplicationId ?? null,
+      };
+    } else if (oneof.case === "unavailable") {
+      normalized.verification = {
+        status: "unavailable",
+        reason: oneof.value?.reason ?? null,
+      };
     } else {
-      normalized.verification = null
+      normalized.verification = null;
     }
   } else {
-    normalized.verification = null
+    normalized.verification = null;
   }
-  return normalized
+  return normalized;
 }
 
 /** Warning text when activation could not be verified, or null. */
 export function activationWarning(response) {
-  const oneof = response?.verification?.verification
-  if (oneof === null || typeof oneof !== 'object') return null
-  if (oneof.case === 'foregroundMismatch') {
-    const observed = oneof.value?.observedApplicationId
-    return `AUV could not bring the application to the front${typeof observed === 'string' && observed !== '' ? ` (${observed} is frontmost instead)` : ''}; check auv_doctor permissions.`
+  const oneof = response?.verification?.verification;
+  if (oneof === null || typeof oneof !== "object") return null;
+  if (oneof.case === "foregroundMismatch") {
+    const observed = oneof.value?.observedApplicationId;
+    return `AUV could not bring the application to the front${typeof observed === "string" && observed !== "" ? ` (${observed} is frontmost instead)` : ""}; check auv_doctor permissions.`;
   }
-  return null
+  return null;
 }
 
 /** Build AUV's `PressKeysRequest` init object for one key combination. */
-export function buildPressKeysRequest({ keys, repeat, intervalMs, applicationId, policy, dryRun = false }) {
-  const options = { keys: [...keys] }
+export function buildPressKeysRequest({
+  keys,
+  repeat,
+  intervalMs,
+  applicationId,
+  policy,
+  dryRun = false,
+}) {
+  const options = { keys: [...keys] };
   if (repeat !== undefined && repeat > 1) {
-    options.count = repeat
-    options.interval = intervalMs ?? 50
+    options.count = repeat;
+    options.interval = intervalMs ?? 50;
   }
   const request = {
     options,
     policy,
     dryRun,
-  }
+  };
   if (applicationId !== undefined) {
-    request.target = { recipient: { case: 'applicationId', value: applicationId } }
+    request.target = {
+      recipient: { case: "applicationId", value: applicationId },
+    };
   } else {
-    request.target = { recipient: { case: 'foreground', value: true } }
+    request.target = { recipient: { case: "foreground", value: true } };
   }
-  return request
+  return request;
 }
 
-/** Build the `ClickOptions` init object for an x/y click. */
-export function buildClickOptions({ button, mouseButton }) {
-  if (button === undefined || button === 'left') return undefined
-  return { button: mouseButton }
+/**
+ * Build the AUV `ClickOptions` init object: button, click count, modifiers and
+ * (window delivery only) the window click strategy. Returns undefined when no
+ * option is needed, so a plain left click sends nothing extra.
+ */
+export function buildClickOptions({
+  button,
+  mouseButton,
+  count,
+  modifiers,
+  windowStrategy,
+}) {
+  const options = {};
+  if (button !== undefined && button !== "left") options.button = mouseButton;
+  if (count !== undefined && count > 1) options.click = { count };
+  if (Array.isArray(modifiers) && modifiers.length > 0) {
+    const flags = {};
+    for (const modifier of modifiers) {
+      const field = CLICK_MODIFIER_VALUES[modifier];
+      if (field !== undefined) flags[field] = true;
+    }
+    if (Object.keys(flags).length > 0) options.modifiers = flags;
+  }
+  if (windowStrategy !== undefined)
+    options.windowStrategy = WINDOW_CLICK_STRATEGY_VALUES[windowStrategy];
+  return Object.keys(options).length === 0 ? undefined : options;
+}
+
+/**
+ * Build AUV `TypeTextOptions` / `PasteTextOptions`: submission key, replacement
+ * of the existing field content, and (when given) the delivery policy.
+ */
+export function buildTextOptions({ policy, replaceExisting, submit }) {
+  const options = {};
+  if (policy !== undefined) options.policy = policy;
+  if (replaceExisting === true) options.replaceExisting = true;
+  if (submit !== undefined) options.submit = TEXT_SUBMIT_VALUES[submit];
+  return Object.keys(options).length === 0 ? undefined : options;
+}
+
+/** A `{x,y,width,height}` frame subset -> AUV `WindowFrameInit` (`origin`/`size`). */
+export function buildWindowFrame(frame) {
+  const output = {};
+  if (frame !== null && typeof frame === "object") {
+    if (frame.x !== undefined && frame.y !== undefined)
+      output.origin = { x: frame.x, y: frame.y };
+    if (frame.width !== undefined && frame.height !== undefined)
+      output.size = { width: frame.width, height: frame.height };
+  }
+  return output;
+}
+
+/** AUV `ScrollMotion` init for one smooth scroll of the given logical deltas. */
+export function buildScrollMotion({
+  dx = 0,
+  dy = 0,
+  durationMs = DEFAULT_SCROLL_MOTION_MS,
+}) {
+  return {
+    total: { deltaX: dx, deltaY: dy },
+    timing: { case: "fixedDuration", value: { duration: durationMs } },
+    sampleRateHz: SCROLL_MOTION_SAMPLE_RATE_HZ,
+  };
+}
+
+/**
+ * AUV `scrollUntil` begin fields: one vertical/horizontal step per iteration
+ * (instant or animated), stopping when `untilText` becomes visible.
+ */
+export function buildScrollUntilRequest({
+  dx = 0,
+  dy = 0,
+  untilText,
+  smooth = false,
+  motionDurationMs = DEFAULT_SCROLL_MOTION_MS,
+}) {
+  const step = smooth
+    ? {
+        case: "motion",
+        value: buildScrollMotion({ dx, dy, durationMs: motionDurationMs }),
+      }
+    : { case: "instant", value: { deltaX: dx, deltaY: dy } };
+  return {
+    step,
+    condition: { case: "textVisible", value: { query: untilText } },
+  };
+}
+
+/** AUV `ScrollUntilStopReason` numeric value -> plain name. */
+export function scrollUntilReasonName(value) {
+  const index = Number(value);
+  return Number.isInteger(index) &&
+    index >= 0 &&
+    index < SCROLL_UNTIL_STOP_REASON_NAMES.length
+    ? SCROLL_UNTIL_STOP_REASON_NAMES[index]
+    : "unspecified";
 }
 
 /** A display id -> the `DisplaySelector` init object SDK calls take. */
 export function displaySelector(displayId) {
-  return { selector: { case: 'display', value: { displayId } } }
+  return { selector: { case: "display", value: { displayId } } };
 }
 
 /** Format the CLI-style target string used for tool output. */
 export function formatTargetString({ windowId, applicationId, displayId }) {
-  if (typeof windowId === 'string' && windowId !== '') return `window:${windowId}`
-  if (typeof applicationId === 'string' && applicationId !== '') return `app:${applicationId}`
-  if (typeof displayId === 'string' && displayId !== '') return `display:${displayId}`
-  return null
+  if (typeof windowId === "string" && windowId !== "")
+    return `window:${windowId}`;
+  if (typeof applicationId === "string" && applicationId !== "")
+    return `app:${applicationId}`;
+  if (typeof displayId === "string" && displayId !== "")
+    return `display:${displayId}`;
+  return null;
 }
 
 /** Map the public policy names to AUV `InputPolicy` numeric values (see sdk.mjs). */
 export const INPUT_POLICY_VALUES = {
-  'background-only': 1,
-  'background-preferred': 2,
-  'foreground-preferred': 3,
-}
+  "background-only": 1,
+  "background-preferred": 2,
+  "foreground-preferred": 3,
+};
 
 // ---------------------------------------------------------------------------
 // 0.2.0 pure helpers: coordinate conversion, drag, wait-for-change,
@@ -712,86 +1384,101 @@ export const INPUT_POLICY_VALUES = {
 
 /** A `{x,y}`-like value -> `{x,y}` when both coordinates are finite, else null. */
 export function normalizePoint(value) {
-  if (value === null || typeof value !== 'object') return null
-  const x = Number(value.x)
-  const y = Number(value.y)
-  return Number.isFinite(x) && Number.isFinite(y) ? { x, y } : null
+  if (value === null || typeof value !== "object") return null;
+  const x = Number(value.x);
+  const y = Number(value.y);
+  return Number.isFinite(x) && Number.isFinite(y) ? { x, y } : null;
 }
 
 /** Top-left of a flat `{x,y,width,height}` rect or a mapped `{origin,size}` rect. */
 export function rectOrigin(rect) {
-  if (rect === null || typeof rect !== 'object') return null
-  const source = rect.origin !== null && typeof rect.origin === 'object' ? rect.origin : rect
-  const x = Number(source.x)
-  const y = Number(source.y)
-  return Number.isFinite(x) && Number.isFinite(y) ? { x, y } : null
+  if (rect === null || typeof rect !== "object") return null;
+  const source =
+    rect.origin !== null && typeof rect.origin === "object"
+      ? rect.origin
+      : rect;
+  const x = Number(source.x);
+  const y = Number(source.y);
+  return Number.isFinite(x) && Number.isFinite(y) ? { x, y } : null;
 }
 
 /** Size of a flat `{x,y,width,height}` rect or a mapped `{origin,size}` rect. */
 export function rectSize(rect) {
-  if (rect === null || typeof rect !== 'object') return null
-  const source = rect.size !== null && typeof rect.size === 'object' ? rect.size : rect
-  const width = Number(source.width)
-  const height = Number(source.height)
-  return Number.isFinite(width) && Number.isFinite(height) ? { width, height } : null
+  if (rect === null || typeof rect !== "object") return null;
+  const source =
+    rect.size !== null && typeof rect.size === "object" ? rect.size : rect;
+  const width = Number(source.width);
+  const height = Number(source.height);
+  return Number.isFinite(width) && Number.isFinite(height)
+    ? { width, height }
+    : null;
 }
 
 /** Either rect shape -> flat `{x,y,width,height}`, or null. */
 export function flatRect(rect) {
-  const origin = rectOrigin(rect)
-  const size = rectSize(rect)
-  if (origin === null || size === null) return null
-  return { x: origin.x, y: origin.y, width: size.width, height: size.height }
+  const origin = rectOrigin(rect);
+  const size = rectSize(rect);
+  if (origin === null || size === null) return null;
+  return { x: origin.x, y: origin.y, width: size.width, height: size.height };
 }
 
 /** Center of either rect shape (logical screen points), or null. */
 export function rectCenter(rect) {
-  const flat = flatRect(rect)
-  if (flat === null) return null
-  return { x: flat.x + flat.width / 2, y: flat.y + flat.height / 2 }
+  const flat = flatRect(rect);
+  if (flat === null) return null;
+  return { x: flat.x + flat.width / 2, y: flat.y + flat.height / 2 };
 }
 
 /** Window-local point + window frame origin -> logical screen point. */
 export function screenPointFromWindowPoint(point, windowFrame) {
-  const origin = rectOrigin(windowFrame)
-  if (origin === null) return null
-  return { x: origin.x + point.x, y: origin.y + point.y }
+  const origin = rectOrigin(windowFrame);
+  if (origin === null) return null;
+  return { x: origin.x + point.x, y: origin.y + point.y };
 }
 
 /** Logical screen point - window frame origin -> window-local point. */
 export function windowPointFromScreenPoint(point, windowFrame) {
-  const origin = rectOrigin(windowFrame)
-  if (origin === null) return null
-  return { x: point.x - origin.x, y: point.y - origin.y }
+  const origin = rectOrigin(windowFrame);
+  if (origin === null) return null;
+  return { x: point.x - origin.x, y: point.y - origin.y };
 }
 
 /** Display-local point + display frame origin -> logical screen point. */
-export const screenPointFromDisplayPoint = screenPointFromWindowPoint
+export const screenPointFromDisplayPoint = screenPointFromWindowPoint;
 /** Logical screen point - display frame origin -> display-local point. */
-export const displayPointFromScreenPoint = windowPointFromScreenPoint
+export const displayPointFromScreenPoint = windowPointFromScreenPoint;
 
 /**
  * Pixels per logical point for a capture: `pixel_size.width / bounds.width`
  * when both are known, otherwise the reported `scale_factor`; null otherwise.
  */
 export function capturePixelRatio(capture) {
-  if (capture === null || typeof capture !== 'object') return null
-  const bounds = flatRect(capture.bounds)
-  const pixel = capture.pixelSize ?? capture.pixel_size ?? capture.pixel_dimensions ?? null
-  const pixelWidth = Number(pixel?.width)
-  if (bounds !== null && Number.isFinite(pixelWidth) && pixelWidth > 0 && bounds.width > 0) {
-    return pixelWidth / bounds.width
+  if (capture === null || typeof capture !== "object") return null;
+  const bounds = flatRect(capture.bounds);
+  const pixel =
+    capture.pixelSize ?? capture.pixel_size ?? capture.pixel_dimensions ?? null;
+  const pixelWidth = Number(pixel?.width);
+  if (
+    bounds !== null &&
+    Number.isFinite(pixelWidth) &&
+    pixelWidth > 0 &&
+    bounds.width > 0
+  ) {
+    return pixelWidth / bounds.width;
   }
-  const scale = Number(capture.scaleFactor ?? capture.scale_factor)
-  return Number.isFinite(scale) && scale > 0 ? scale : null
+  const scale = Number(capture.scaleFactor ?? capture.scale_factor);
+  return Number.isFinite(scale) && scale > 0 ? scale : null;
 }
 
 /** Screen point -> center in the captured image's pixel space (see COORDINATE_NOTE). */
 export function imagePixelFromScreenPoint(screenPoint, capture) {
-  const bounds = flatRect(capture?.bounds)
-  const ratio = capturePixelRatio(capture)
-  if (bounds === null || ratio === null) return null
-  return { x: (screenPoint.x - bounds.x) * ratio, y: (screenPoint.y - bounds.y) * ratio }
+  const bounds = flatRect(capture?.bounds);
+  const ratio = capturePixelRatio(capture);
+  if (bounds === null || ratio === null) return null;
+  return {
+    x: (screenPoint.x - bounds.x) * ratio,
+    y: (screenPoint.y - bounds.y) * ratio,
+  };
 }
 
 /**
@@ -801,20 +1488,89 @@ export function imagePixelFromScreenPoint(screenPoint, capture) {
  * `scale_factor`, and `pixel_ratio`.
  */
 export function enrichTextMatches(matches, capture, windowFrame) {
-  if (!Array.isArray(matches)) return []
-  const ratio = capturePixelRatio(capture)
-  const scale = Number(capture?.scaleFactor ?? capture?.scale_factor)
+  if (!Array.isArray(matches)) return [];
+  const ratio = capturePixelRatio(capture);
+  const scale = Number(capture?.scaleFactor ?? capture?.scale_factor);
   return matches.map((match) => {
-    const center = rectCenter(match?.bounds)
+    const center = rectCenter(match?.bounds);
     return {
       ...match,
       screen_point: center,
-      image_pixel: center === null ? null : imagePixelFromScreenPoint(center, capture),
-      window_point: center === null || windowFrame === null || windowFrame === undefined ? null : windowPointFromScreenPoint(center, windowFrame),
+      image_pixel:
+        center === null ? null : imagePixelFromScreenPoint(center, capture),
+      window_point:
+        center === null || windowFrame === null || windowFrame === undefined
+          ? null
+          : windowPointFromScreenPoint(center, windowFrame),
       scale_factor: Number.isFinite(scale) ? scale : null,
       pixel_ratio: ratio,
-    }
-  })
+    };
+  });
+}
+
+/** Map one OCR `RecognizedText` entry to `{text, bounds, confidence}`. */
+export function mapRecognizedText(entry) {
+  if (entry === null || entry === undefined || typeof entry !== "object")
+    return null;
+  return {
+    bounds: mapRect(entry.bounds),
+    confidence: Number.isFinite(Number(entry.confidence))
+      ? Number(entry.confidence)
+      : null,
+    text:
+      typeof entry.text === "string" ? entry.text : String(entry.text ?? ""),
+  };
+}
+
+/**
+ * Map a full `recognizeText` response to `{text, origin, regions}`.
+ *
+ * AUV reports region bounds as logical offsets from `origin`; `screen_bounds`
+ * offsets them back into logical screen points so the same coordinate fields as
+ * OCR matches (`screen_point`, `image_pixel`, `window_point`) apply.
+ */
+export function mapRecognizeResult(response, capture, windowFrame) {
+  const origin = normalizePoint(response?.origin);
+  const ratio = capturePixelRatio(capture);
+  const scale = Number(capture?.scaleFactor ?? capture?.scale_factor);
+  const raw = Array.isArray(response?.regions) ? response.regions : [];
+  const regions = [];
+  for (const entry of raw) {
+    const mapped = mapRecognizedText(entry);
+    if (mapped === null) continue;
+    const bounds = mapped.bounds;
+    const screenBounds =
+      bounds === null
+        ? null
+        : origin === null
+          ? bounds
+          : {
+              origin: {
+                x: origin.x + bounds.origin.x,
+                y: origin.y + bounds.origin.y,
+              },
+              size: bounds.size,
+            };
+    const center = rectCenter(screenBounds);
+    regions.push({
+      ...mapped,
+      screen_bounds: screenBounds,
+      screen_point: center,
+      image_pixel:
+        center === null ? null : imagePixelFromScreenPoint(center, capture),
+      window_point:
+        center === null || windowFrame === null || windowFrame === undefined
+          ? null
+          : windowPointFromScreenPoint(center, windowFrame),
+      scale_factor: Number.isFinite(scale) ? scale : null,
+      pixel_ratio: ratio,
+    });
+  }
+  return {
+    text: typeof response?.text === "string" ? response.text : "",
+    origin,
+    regions,
+  };
 }
 
 /**
@@ -822,11 +1578,17 @@ export function enrichTextMatches(matches, capture, windowFrame) {
  * start at the source point, then one cubic Bézier segment from screen
  * `{dx/3, dy/3}` / `{2dx/3, 2dy/3}` to `{dx, dy}`.
  */
-export function buildDragMovement({ startScreen, endScreen, durationMs = DEFAULT_DRAG_DURATION_MS }) {
-  const dx = endScreen.x - startScreen.x
-  const dy = endScreen.y - startScreen.y
+export function buildDragMovement({
+  startScreen,
+  endScreen,
+  durationMs = DEFAULT_DRAG_DURATION_MS,
+}) {
+  const dx = endScreen.x - startScreen.x;
+  const dy = endScreen.y - startScreen.y;
   return {
-    start: { source: { case: 'point', value: { x: startScreen.x, y: startScreen.y } } },
+    start: {
+      source: { case: "point", value: { x: startScreen.x, y: startScreen.y } },
+    },
     curve: {
       start: { x: 0, y: 0 },
       segments: [
@@ -839,69 +1601,83 @@ export function buildDragMovement({ startScreen, endScreen, durationMs = DEFAULT
     },
     mapping: { width: 1, height: 1 },
     options: { duration: durationMs, sampleRateHz: 60, curveTolerance: 0.5 },
-  }
+  };
 }
 
 /** Default keys delivery policy when the caller omits `policy`. */
-export const DEFAULT_KEYS_POLICY = 'foreground-preferred'
+export const DEFAULT_KEYS_POLICY = "foreground-preferred";
 
 /**
  * Decide whether `auv_keys` focuses first and which policy to use.
  * @returns {{targeted: boolean, effectivePolicy: string, focus: boolean, focusTarget: 'window'|'application'|null}}
  */
 export function planKeysDelivery(plan = {}) {
-  const targeted = plan.windowId !== undefined || plan.applicationId !== undefined
-  const effectivePolicy = plan.policy ?? DEFAULT_KEYS_POLICY
-  const focus = targeted && plan.focus === true
-  const focusTarget = focus ? (plan.windowId !== undefined ? 'window' : 'application') : null
+  const targeted =
+    plan.windowId !== undefined || plan.applicationId !== undefined;
+  const effectivePolicy = plan.policy ?? DEFAULT_KEYS_POLICY;
+  const focus = targeted && plan.focus === true;
+  const focusTarget = focus
+    ? plan.windowId !== undefined
+      ? "window"
+      : "application"
+    : null;
   // Unity/canvas apps often ignore window-recipient key events. When the caller
   // asks for foreground delivery, activate the target and send a real
   // foreground key event instead of a window-targeted one.
-  const deliveryVia = effectivePolicy === 'foreground-preferred' ? 'foreground' : targeted ? 'window' : 'foreground'
-  return { targeted, effectivePolicy, focus, focusTarget, deliveryVia }
+  const deliveryVia =
+    effectivePolicy === "foreground-preferred"
+      ? "foreground"
+      : targeted
+        ? "window"
+        : "foreground";
+  return { targeted, effectivePolicy, focus, focusTarget, deliveryVia };
 }
 
 // --- auv_wait_for_change ----------------------------------------------------
 
 /** Lowercase hex of a `Uint8Array`/byte view; '' when not byte-like. */
 export function bytesToHex(bytes) {
-  if (bytes === null || bytes === undefined) return ''
-  let data
-  if (bytes instanceof Uint8Array) data = bytes
-  else if (ArrayBuffer.isView(bytes)) data = new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength)
-  else return ''
-  let hex = ''
-  for (const byte of data) hex += byte.toString(16).padStart(2, '0')
-  return hex
+  if (bytes === null || bytes === undefined) return "";
+  let data;
+  if (bytes instanceof Uint8Array) data = bytes;
+  else if (ArrayBuffer.isView(bytes))
+    data = new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  else return "";
+  let hex = "";
+  for (const byte of data) hex += byte.toString(16).padStart(2, "0");
+  return hex;
 }
 
 /** `thumbhash:<hex>` when the capture carries a ThumbHash, else null. */
 export function thumbhashOf(capture) {
-  const hex = bytesToHex(capture?.thumbhash)
-  return hex === '' ? null : `thumbhash:${hex}`
+  const hex = bytesToHex(capture?.thumbhash);
+  return hex === "" ? null : `thumbhash:${hex}`;
 }
 
 /** Abortable sleep used between frame captures. */
 export function sleep(ms, signal) {
   return new Promise((resolve) => {
     if (signal?.aborted === true) {
-      resolve()
-      return
+      resolve();
+      return;
     }
     const cleanup = () => {
-      clearTimeout(timer)
-      signal?.removeEventListener('abort', onAbort)
-    }
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+    };
     const onAbort = () => {
-      cleanup()
-      resolve()
-    }
-    const timer = setTimeout(() => {
-      cleanup()
-      resolve()
-    }, Math.max(0, ms))
-    signal?.addEventListener('abort', onAbort, { once: true })
-  })
+      cleanup();
+      resolve();
+    };
+    const timer = setTimeout(
+      () => {
+        cleanup();
+        resolve();
+      },
+      Math.max(0, ms),
+    );
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 /**
@@ -932,42 +1708,44 @@ export async function pollForChange({
   now = Date.now,
   sleep: sleepImpl = sleep,
 }) {
-  const started = now()
-  let before = baseline === undefined ? await captureSnapshot() : baseline
-  let after = before
-  let lastComparison = { changed: false, ratio: 0 }
-  let result = 'timeout'
+  const started = now();
+  let before = baseline === undefined ? await captureSnapshot() : baseline;
+  let after = before;
+  let lastComparison = { changed: false, ratio: 0 };
+  let result = "timeout";
   for (;;) {
     if (signal?.aborted === true) {
-      result = 'no_effect'
-      break
+      result = "no_effect";
+      break;
     }
-    const elapsed = now() - started
+    const elapsed = now() - started;
     if (elapsed >= timeoutMs) {
-      result = 'timeout'
-      break
+      result = "timeout";
+      break;
     }
-    await sleepImpl(Math.min(intervalMs, timeoutMs - elapsed), signal)
+    await sleepImpl(Math.min(intervalMs, timeoutMs - elapsed), signal);
     if (signal?.aborted === true) {
-      result = 'no_effect'
-      break
+      result = "no_effect";
+      break;
     }
-    after = await captureSnapshot()
-    lastComparison = compare(before, after)
+    after = await captureSnapshot();
+    lastComparison = compare(before, after);
     if (lastComparison.changed === true) {
-      result = 'changed'
-      break
+      result = "changed";
+      break;
     }
   }
   return {
     result,
-    changed: result === 'changed',
+    changed: result === "changed",
     elapsedMs: now() - started,
     before,
     after,
     lastComparison,
-    changedRatio: Number.isFinite(Number(lastComparison.ratio)) ? Number(lastComparison.ratio) : 0,
-  }
+    changedRatio: Number.isFinite(Number(lastComparison.ratio))
+      ? Number(lastComparison.ratio)
+      : 0,
+  };
 }
 
 /**
@@ -978,51 +1756,81 @@ export async function pollForChange({
  * noise). Returns `{changedRatio, differingPixels, comparedPixels, dimensionMismatch}`;
  * a dimension change is reported as fully changed.
  */
-export function compareRgbaFrames(before, after, pixelThreshold = DEFAULT_PIXEL_THRESHOLD) {
-  const width = Number(before?.width)
-  const height = Number(before?.height)
-  if (!Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0) {
-    throw new Error('compareRgbaFrames requires positive integer frame dimensions.')
+export function compareRgbaFrames(
+  before,
+  after,
+  pixelThreshold = DEFAULT_PIXEL_THRESHOLD,
+) {
+  const width = Number(before?.width);
+  const height = Number(before?.height);
+  if (
+    !Number.isInteger(width) ||
+    !Number.isInteger(height) ||
+    width <= 0 ||
+    height <= 0
+  ) {
+    throw new Error(
+      "compareRgbaFrames requires positive integer frame dimensions.",
+    );
   }
-  const frameA = before?.data
-  const frameB = after?.data
+  const frameA = before?.data;
+  const frameB = after?.data;
   if (!(frameA instanceof Uint8Array) || !(frameB instanceof Uint8Array)) {
-    throw new Error('compareRgbaFrames requires Uint8Array pixel data.')
+    throw new Error("compareRgbaFrames requires Uint8Array pixel data.");
   }
-  const otherWidth = Number(after?.width)
-  const otherHeight = Number(after?.height)
+  const otherWidth = Number(after?.width);
+  const otherHeight = Number(after?.height);
   if (otherWidth !== width || otherHeight !== height) {
     // A resize is always a change, even though the pixel buffers differ in shape.
-    return { changedRatio: 1, differingPixels: width * height, comparedPixels: width * height, dimensionMismatch: true }
+    return {
+      changedRatio: 1,
+      differingPixels: width * height,
+      comparedPixels: width * height,
+      dimensionMismatch: true,
+    };
   }
-  const expectedBytes = width * height * 4
+  const expectedBytes = width * height * 4;
   if (frameA.byteLength < expectedBytes || frameB.byteLength < expectedBytes) {
-    throw new Error('compareRgbaFrames received frames shorter than width * height * 4 bytes.')
+    throw new Error(
+      "compareRgbaFrames received frames shorter than width * height * 4 bytes.",
+    );
   }
-  const threshold = Number.isFinite(Number(pixelThreshold)) ? Math.max(0, Number(pixelThreshold)) : DEFAULT_PIXEL_THRESHOLD
-  const pixels = width * height
-  let differingPixels = 0
+  const threshold = Number.isFinite(Number(pixelThreshold))
+    ? Math.max(0, Number(pixelThreshold))
+    : DEFAULT_PIXEL_THRESHOLD;
+  const pixels = width * height;
+  let differingPixels = 0;
   for (let index = 0; index < expectedBytes; index += 4) {
     if (
       Math.abs(frameA[index] - frameB[index]) > threshold ||
       Math.abs(frameA[index + 1] - frameB[index + 1]) > threshold ||
       Math.abs(frameA[index + 2] - frameB[index + 2]) > threshold
     ) {
-      differingPixels += 1
+      differingPixels += 1;
     }
   }
-  return { changedRatio: differingPixels / pixels, differingPixels, comparedPixels: pixels, dimensionMismatch: false }
+  return {
+    changedRatio: differingPixels / pixels,
+    differingPixels,
+    comparedPixels: pixels,
+    dimensionMismatch: false,
+  };
 }
 
 /**
  * Whether a pixel comparison crosses `minChangedRatio`. An identical frame is
  * never a change, even when `minChangedRatio` is 0.
  */
-export function frameChanged(comparison, minChangedRatio = DEFAULT_MIN_CHANGED_RATIO) {
-  const ratio = Number(comparison?.changedRatio)
-  const minimum = Number.isFinite(Number(minChangedRatio)) ? Number(minChangedRatio) : DEFAULT_MIN_CHANGED_RATIO
-  if (!Number.isFinite(ratio) || ratio <= 0) return false
-  return ratio >= minimum
+export function frameChanged(
+  comparison,
+  minChangedRatio = DEFAULT_MIN_CHANGED_RATIO,
+) {
+  const ratio = Number(comparison?.changedRatio);
+  const minimum = Number.isFinite(Number(minChangedRatio))
+    ? Number(minChangedRatio)
+    : DEFAULT_MIN_CHANGED_RATIO;
+  if (!Number.isFinite(ratio) || ratio <= 0) return false;
+  return ratio >= minimum;
 }
 
 /**
@@ -1032,44 +1840,49 @@ export function frameChanged(comparison, minChangedRatio = DEFAULT_MIN_CHANGED_R
  * and touches it (LRU) or null when unknown/expired. The oldest entry is
  * evicted past `maxEntries`.
  */
-export function createCaptureStateStore({ maxEntries = CAPTURE_STATE_MAX_ENTRIES, ttlMs = CAPTURE_STATE_TTL_MS, now = () => Date.now() } = {}) {
-  const entries = new Map()
+export function createCaptureStateStore({
+  maxEntries = CAPTURE_STATE_MAX_ENTRIES,
+  ttlMs = CAPTURE_STATE_TTL_MS,
+  now = () => Date.now(),
+} = {}) {
+  const entries = new Map();
   const store = {
     put(token, value) {
-      if (typeof token !== 'string' || token === '') throw new Error('capture state token must be a non-empty string.')
-      entries.delete(token)
-      entries.set(token, { value, storedAt: now() })
+      if (typeof token !== "string" || token === "")
+        throw new Error("capture state token must be a non-empty string.");
+      entries.delete(token);
+      entries.set(token, { value, storedAt: now() });
       while (entries.size > maxEntries) {
-        const oldest = entries.keys().next().value
-        entries.delete(oldest)
+        const oldest = entries.keys().next().value;
+        entries.delete(oldest);
       }
-      return value
+      return value;
     },
     get(token) {
-      const entry = entries.get(token)
-      if (entry === undefined) return null
+      const entry = entries.get(token);
+      if (entry === undefined) return null;
       if (now() - entry.storedAt >= ttlMs) {
-        entries.delete(token)
-        return null
+        entries.delete(token);
+        return null;
       }
-      entries.delete(token)
-      entries.set(token, entry)
-      return entry.value
+      entries.delete(token);
+      entries.set(token, entry);
+      return entry.value;
     },
     delete(token) {
-      entries.delete(token)
+      entries.delete(token);
     },
     clear() {
-      entries.clear()
+      entries.clear();
     },
     get size() {
-      return entries.size
+      return entries.size;
     },
     keys() {
-      return [...entries.keys()]
+      return [...entries.keys()];
     },
-  }
-  return store
+  };
+  return store;
 }
 
 // --- repeat guard -----------------------------------------------------------
@@ -1080,21 +1893,26 @@ export function createCaptureStateStore({ maxEntries = CAPTURE_STATE_MAX_ENTRIES
  * different call), `undefined` fields dropped.
  */
 export function canonicalize(value) {
-  if (value === null) return 'null'
-  if (Array.isArray(value)) return `[${value.map(canonicalize).join(',')}]`
-  if (typeof value === 'object') {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return `[${value.map(canonicalize).join(",")}]`;
+  if (typeof value === "object") {
     const keys = Object.keys(value)
-      .filter((key) => value[key] !== undefined && key !== 'allow_repeat' && key !== 'allowRepeat')
-      .sort()
-    return `{${keys.map((key) => `${JSON.stringify(key)}:${canonicalize(value[key])}`).join(',')}}`
+      .filter(
+        (key) =>
+          value[key] !== undefined &&
+          key !== "allow_repeat" &&
+          key !== "allowRepeat",
+      )
+      .sort();
+    return `{${keys.map((key) => `${JSON.stringify(key)}:${canonicalize(value[key])}`).join(",")}}`;
   }
-  const json = JSON.stringify(value)
-  return json === undefined ? 'null' : json
+  const json = JSON.stringify(value);
+  return json === undefined ? "null" : json;
 }
 
 /** Canonical identity for one mutating call: tool name + arguments. */
 export function repeatGuardKey(toolName, args) {
-  return `${toolName}:${canonicalize(isPlainObject(args) ? args : {})}`
+  return `${toolName}:${canonicalize(isPlainObject(args) ? args : {})}`;
 }
 
 /**
@@ -1105,31 +1923,39 @@ export function repeatGuardKey(toolName, args) {
  * counter. `bypass()` clears the state (used when `allow_repeat: true` sends a
  * call anyway).
  */
-export function createRepeatGuard({ windowMs = REPEAT_GUARD_WINDOW_MS, limit = REPEAT_GUARD_LIMIT } = {}) {
-  let lastKey = null
-  let repeatCount = 0
-  let lastAt = 0
+export function createRepeatGuard({
+  windowMs = REPEAT_GUARD_WINDOW_MS,
+  limit = REPEAT_GUARD_LIMIT,
+} = {}) {
+  let lastKey = null;
+  let repeatCount = 0;
+  let lastAt = 0;
   return {
     check(toolName, args, now = Date.now()) {
-      const key = repeatGuardKey(toolName, args)
-      if (key === lastKey && now - lastAt <= windowMs) repeatCount += 1
+      const key = repeatGuardKey(toolName, args);
+      if (key === lastKey && now - lastAt <= windowMs) repeatCount += 1;
       else {
-        lastKey = key
-        repeatCount = 1
+        lastKey = key;
+        repeatCount = 1;
       }
-      lastAt = now
-      const blocked = repeatCount >= limit
-      return { blocked, repeatCount, key, message: blocked ? REPEAT_GUARD_MESSAGE : null }
+      lastAt = now;
+      const blocked = repeatCount >= limit;
+      return {
+        blocked,
+        repeatCount,
+        key,
+        message: blocked ? REPEAT_GUARD_MESSAGE : null,
+      };
     },
     bypass() {
-      lastKey = null
-      repeatCount = 0
-      lastAt = 0
+      lastKey = null;
+      repeatCount = 0;
+      lastAt = 0;
     },
     snapshot() {
-      return { key: lastKey, repeatCount, lastAt }
+      return { key: lastKey, repeatCount, lastAt };
     },
-  }
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1140,13 +1966,23 @@ export function createRepeatGuard({ windowMs = REPEAT_GUARD_WINDOW_MS, limit = R
  * AUV `PermissionStatus` enum values
  * (`PERMISSION_STATUS_UNSPECIFIED/GRANTED/MISSING/UNKNOWN` = 0/1/2/3).
  */
-export const PERMISSION_STATUS_NAMES = ['unknown', 'granted', 'missing', 'unknown']
+export const PERMISSION_STATUS_NAMES = [
+  "unknown",
+  "granted",
+  "missing",
+  "unknown",
+];
 
 /** AUV `PermissionStatus` numeric value -> plain name. */
 export function permissionStatusName(value) {
-  const index = Number(value)
-  if (!Number.isInteger(index) || index < 0 || index >= PERMISSION_STATUS_NAMES.length) return 'unknown'
-  return PERMISSION_STATUS_NAMES[index]
+  const index = Number(value);
+  if (
+    !Number.isInteger(index) ||
+    index < 0 ||
+    index >= PERMISSION_STATUS_NAMES.length
+  )
+    return "unknown";
+  return PERMISSION_STATUS_NAMES[index];
 }
 
 /**
@@ -1156,13 +1992,14 @@ export function permissionStatusName(value) {
  * @returns {{accessibility: string, screen_recording: string, screen_capture_kit: string, automation: string}|null}
  */
 export function summarizePermissions(probe) {
-  if (probe === null || probe === undefined || typeof probe !== 'object') return null
+  if (probe === null || probe === undefined || typeof probe !== "object")
+    return null;
   return {
     accessibility: permissionStatusName(probe.accessibility),
     screen_recording: permissionStatusName(probe.screenRecording),
     screen_capture_kit: permissionStatusName(probe.screenCaptureKit),
     automation: permissionStatusName(probe.automationToSystemEvents),
-  }
+  };
 }
 
 /**
@@ -1173,14 +2010,14 @@ export function summarizePermissions(probe) {
  * System Events is optional (some activation paths fall back without it).
  */
 export function permissionsAllOk(permissions) {
-  if (permissions === null || permissions === undefined) return false
+  if (permissions === null || permissions === undefined) return false;
   return (
-    permissions.accessibility === 'granted' &&
-    permissions.screen_recording === 'granted' &&
-    permissions.screen_capture_kit !== 'missing'
-  )
+    permissions.accessibility === "granted" &&
+    permissions.screen_recording === "granted" &&
+    permissions.screen_capture_kit !== "missing"
+  );
 }
 
 /** Plain recommendation shown when a macOS permission is missing. */
 export const PERMISSION_RECOMMENDATION =
-  'Open System Settings → Privacy & Security, enable DeepSeek Harness (macOS 27+ merges the permission list into "Device Control and Data Access"; older macOS shows Accessibility and Screen Recording as separate items), restart DeepSeek Harness, then run auv_doctor again.'
+  'Open System Settings → Privacy & Security, enable DeepSeek Harness (macOS 27+ merges the permission list into "Device Control and Data Access"; older macOS shows Accessibility and Screen Recording as separate items), restart DeepSeek Harness, then run auv_doctor again.';

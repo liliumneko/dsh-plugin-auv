@@ -1,5 +1,5 @@
 /**
- * The twelve native DSH tools exposed by @local/dsh-auv.
+ * The fourteen native DSH tools exposed by @local/dsh-auv.
  *
  * Each entry is a plain DSH ToolDefinition: name, description, object-rooted
  * parameter JSON Schema (within the enforced DSH subset), a `{}` output schema,
@@ -24,6 +24,7 @@ import {
   parseActivateArgs,
   parseCaptureStateArgs,
   parseClickArgs,
+  parseDisplaysArgs,
   parseDragArgs,
   parseKeysArgs,
   parseOcrArgs,
@@ -31,6 +32,7 @@ import {
   parseScrollArgs,
   parseTypeArgs,
   parseWaitForChangeArgs,
+  parseWindowArgs,
   parseWindowsArgs,
 } from './transport/sdk-format.mjs'
 import { activeSdkTransport, requireCaptureState } from './transport/sdk.mjs'
@@ -54,6 +56,8 @@ export const TOOL_NAMES = [
   'auv_capture_state',
   'auv_wait_for_change',
   'auv_windows',
+  'auv_window',
+  'auv_displays',
   'auv_activate',
 ]
 
@@ -218,19 +222,19 @@ const SCREENSHOT_DESCRIPTION =
   'Capture a screenshot and return its saved image path. Use it to see the desktop, a window, or a screen region, then call read_image with artifact_path to view the image. Target one window with window_id, one application with application_id, one display with display_id, or a screen rectangle with region; pass only one. Captures are .webp artifacts and image bytes are never returned. The value includes bounds (logical screen rect), origin, scale_factor, and pixel_size: image_pixel = (screen_point - bounds.origin) * pixel_ratio, where pixel_ratio = pixel_size.width / bounds.size.width. All tool points are logical screen points. Use auv_ocr to read text. Screen capture needs Screen Recording permission for DeepSeek Harness; run auv_doctor if it fails.'
 
 const OCR_DESCRIPTION =
-  'Locate text on screen with Vision OCR and return the matches with their screen bounds. Use it to find a control before auv_click with text, or to read text that has no accessibility tree. Set wait: true to poll until the text appears, with an optional timeout_ms. Restrict the search with window_id or application_id; omit both to search the primary display. Each match keeps bounds (logical screen points) and adds screen_point (center), image_pixel = (screen_point - bounds.origin) * pixel_ratio, window_point = screen_point - window.frame.origin when windowed, scale_factor, and pixel_ratio. Text recognition needs Screen Recording permission for DeepSeek Harness; run auv_doctor if it fails.'
+  'Read text on screen or find one string with Vision OCR. mode "read" returns the whole recognized text plus every text region; mode "find" (default, requires text) returns the matches for that literal string. Set wait: true (find only) to poll until the text appears, with an optional timeout_ms. Restrict the search with window_id or application_id, a display_id, or a screen rectangle in region (screen/display targets only). custom_words helps with unusual names; recognition_languages picks OCR languages, for example ["en-US"]. Matches and regions keep screen bounds (logical points) plus screen_point, image_pixel, window_point when windowed, scale_factor and pixel_ratio. Use auv_click with text to click a match. Text recognition needs Screen Recording permission for DeepSeek Harness; run auv_doctor if it fails.'
 
 const CLICK_DESCRIPTION =
-  'Click a UI element or an exact point. Pass text to locate it with OCR and click the match, or x and y to click a point; pass exactly one form. For x/y clicks, space chooses how the point is interpreted: window (window-local; default when a window or application target is given), screen (logical screen; default otherwise) or display (display-local; requires display_id). Unity/Canvas games often ignore window-targeted clicks, so pass space:"screen" there (or omit window_id entirely and give screen x/y); the point is then delivered as a foreground global click. button selects the mouse button; within fences an OCR click to a screen rectangle. The result returns screen_point plus window_point/display_point when known. This performs a real click and needs Accessibility permission for DeepSeek Harness; run auv_doctor if it is refused or lands nowhere. Repeating the same call is blocked after 3 tries within 30s; allow_repeat:true overrides.'
+  'Click a UI element or an exact point. Pass text to locate it with OCR and click the match, or x and y to click a point; pass exactly one form. For x/y clicks, space chooses how the point is interpreted: window (window-local; default when a window or application target is given), screen (logical screen; default otherwise) or display (display-local; requires display_id). Unity/Canvas games often ignore window-targeted clicks, so pass space:"screen" there (or omit window_id entirely and give screen x/y); the point is then delivered as a foreground global click. count repeats the click (2 is a double click); modifiers adds cmd/shift/ctrl/alt to the click; window_strategy (chromium-compatible or pid-targeted) selects how a window-targeted click is delivered. button selects the mouse button; within fences an OCR click to a screen rectangle. The result returns screen_point plus window_point/display_point when known. This performs a real click and needs Accessibility permission for DeepSeek Harness; run auv_doctor if it is refused or lands nowhere. Repeating the same call is blocked after 3 tries within 30s; allow_repeat:true overrides.'
 
 const TYPE_DESCRIPTION =
-  'Type or paste text into the focused control. mode "type" (default) sends keystrokes; mode "paste" uses the clipboard and restores it, which is faster and safer for long or non-ASCII text. Optionally send to a window_id or application_id and choose the delivery policy. The result is delivery evidence, not proof the app reacted; pair it with auv_wait_for_change to verify. This is real keyboard input and needs Accessibility permission for DeepSeek Harness; run auv_doctor if keystrokes do not arrive. Repeating the same call is blocked after 3 tries within 30s; allow_repeat:true overrides.'
+  'Type or paste text into the focused control. mode "type" (default) sends keystrokes; mode "paste" uses the clipboard and restores it, which is faster and safer for long or non-ASCII text. submit presses a submit key after the text: return, search, done or go (none sends nothing extra); replace_existing selects the existing field content first so the text replaces it instead of appending. Optionally send to a window_id or application_id and choose the delivery policy. The result is delivery evidence, not proof the app reacted; pair it with auv_wait_for_change to verify. This is real keyboard input and needs Accessibility permission for DeepSeek Harness; run auv_doctor if keystrokes do not arrive. Repeating the same call is blocked after 3 tries within 30s; allow_repeat:true overrides.'
 
 const KEYS_DESCRIPTION =
-  'Press one key combination such as ["ctrl","l"] or ["cmd","shift","t"]. Modifiers come first and are released in reverse order. repeat presses the combination multiple times. Optionally target a window_id or application_id: with a target, focus defaults to true and the target is focused first (window.setFocus / applications.activate), and policy picks delivery (background-only, background-preferred, foreground-preferred; default foreground-preferred; background policies require a target). Without a target the foreground app receives the keys. With foreground-preferred (the default) and a target, the plugin focuses the target and sends a real foreground key event, because Unity/Canvas apps often ignore window-targeted events. AUV reports delivery only, not that the app reacted; pair with auv_wait_for_change to verify. This is real keyboard input that needs Accessibility permission for DeepSeek Harness; use auv_type for text. Run auv_doctor on failure. Repeating the same call is blocked after 3 tries within 30s; allow_repeat:true overrides.'
+  'Press one key combination such as ["ctrl","l"] or ["cmd","shift","t"]. Modifiers come first and are released in reverse order. repeat presses the combination multiple times; hold_ms instead holds the keys down for that many milliseconds before releasing. Optionally target a window_id or application_id: with a target, focus defaults to true and the target is focused first (window.setFocus / applications.activate), and policy picks delivery (background-only, background-preferred, foreground-preferred; default foreground-preferred; background policies require a target). Without a target the foreground app receives the keys. With foreground-preferred (the default) and a target, the plugin focuses the target and sends a real foreground key event, because Unity/Canvas apps often ignore window-targeted events. AUV reports delivery only, not that the app reacted; pair with auv_wait_for_change to verify. This is real keyboard input that needs Accessibility permission for DeepSeek Harness; use auv_type for text. Run auv_doctor on failure. Repeating the same call is blocked after 3 tries within 30s; allow_repeat:true overrides.'
 
 const SCROLL_DESCRIPTION =
-  'Scroll at a point. dy is required and positive dy scrolls down; dx scrolls right when given. With window_id, scroll inside that window at its center or at window-local x and y. Without window_id, pass screen x and y; macOS does not support AUV screen-point scrolling, so prefer window_id on macOS. Deltas are logical pixels; results return window_point and the delivered screen_point. This is real input that needs Accessibility permission for DeepSeek Harness; run auv_doctor on failure. Repeating the same call is blocked after 3 tries within 30s; allow_repeat:true overrides.'
+  'Scroll at a point. dy is required and positive dy scrolls down; dx scrolls right when given. With window_id, scroll inside that window at its center or at window-local x and y. Without window_id, pass screen x and y; macOS does not support AUV screen-point scrolling, so prefer window_id on macOS. smooth animates the scroll over about 300 ms instead of one instant delta (requires window_id). until_text keeps scrolling in dy/dx steps until that text becomes visible, the viewport stops moving, or AUV reaches its step budget (requires window_id and a single scroll axis); combine it with smooth for animated steps. Deltas are logical pixels; results return window_point and the delivered screen_point, and until_text adds the stop reason, step count and matched text. This is real input that needs Accessibility permission for DeepSeek Harness; run auv_doctor on failure. Repeating the same call is blocked after 3 tries within 30s; allow_repeat:true overrides.'
 
 const DRAG_DESCRIPTION =
   'Drag with a mouse button from one point to another. from and to are points in the selected space; space defaults to window for a window or application target, display for display_id, and screen otherwise, and window/display points are converted to logical screen points with the target frame. With window_id or application_id the target is focused first unless activate:false, because macOS drags move the real pointer and an inactive window can consume the first press. button defaults to left; duration_ms defaults to 300. The result returns from/to, screen_start/screen_end, and window_point when windowed. This performs real mouse input and needs Accessibility permission for DeepSeek Harness; run auv_doctor if it fails. Repeating the same call is blocked after 3 tries within 30s; allow_repeat:true overrides.'
@@ -243,6 +247,12 @@ const CAPTURE_STATE_DESCRIPTION =
 
 const WINDOWS_DESCRIPTION =
   'List the windows you could switch to, with each window id, owning application and application id, title, frame, and state. Use it to find window_id and application_id values for the other tools. Minimized windows and windows on other desktops are excluded by default; set include_minimized or include_other_desktops to include them. Window state comes from the window server and needs no Accessibility permission.'
+
+const WINDOW_DESCRIPTION =
+  'Inspect or change one window by window_id from auv_windows. action "refresh" reads its current frame and state without changing anything; "focus" raises it and gives it keyboard focus; "minimize", "maximize" and "restore" change its state (restore returns it to a normal window); "set_frame" moves or resizes it with frame {x, y, width, height}, passing x with y and width with height. The value includes the window before and after the action plus the raw mutation evidence, and warns when the app settled a different frame. A minimized or full-screen window must be restored before set_frame. Window changes need Accessibility permission for DeepSeek Harness; run auv_doctor if they are refused.'
+
+const DISPLAYS_DESCRIPTION =
+  'List the displays AUV can capture or target, with each display id, name, frame (logical screen rect), scale_factor, and whether it is primary or built-in. Use a display id as display_id in auv_screenshot, auv_ocr, auv_capture_state or auv_click with space "display". Read-only; call auv_doctor if the list is empty or the call fails.'
 
 const ACTIVATE_DESCRIPTION =
   'Bring an application to the front by its application id: the bundle id on macOS, for example com.apple.TextEdit. Use it before typing or clicking when the target app is not focused. Get ids from auv_windows. This changes foreground focus but enters no text. If activation is refused or ineffective, run auv_doctor to check permissions.'
@@ -335,7 +345,14 @@ function formatWindowLine(window) {
   return `- id ${id} | ${app} | ${title}${geometry}${flags.length > 0 ? ` | ${flags.join(', ')}` : ''}`
 }
 
-/** All nine tool definitions, created fresh on each call. */
+/** Frame/state summary of a mapped window row, without the leading id field. */
+function windowSummaryLine(window) {
+  if (window === null || typeof window !== 'object') return 'unreadable window'
+  const parts = formatWindowLine(window).split(' | ')
+  return parts.length > 1 ? parts.slice(1).join(' | ') : formatWindowLine(window)
+}
+
+/** All fourteen tool definitions, created fresh on each call. */
 export function createTools() {
   return [
     {
@@ -398,25 +415,42 @@ export function createTools() {
     {
       name: 'auv_ocr',
       description: OCR_DESCRIPTION,
-      parameters: objectSchema(
-        {
-          text: stringProperty('Literal text to find in the captured image.'),
-          window_id: stringProperty(WINDOW_ID_DESCRIPTION),
-          application_id: stringProperty(APPLICATION_ID_DESCRIPTION),
-          wait: booleanProperty('Poll until the text appears instead of failing immediately.'),
-          timeout_ms: integerProperty('Polling timeout in milliseconds, 100-120000. Only valid with wait: true.'),
+      parameters: objectSchema({
+        mode: enumProperty('"find" (default) locates one string; "read" returns every recognized text region.', ['find', 'read']),
+        text: stringProperty('Literal text to find; required unless mode is "read".'),
+        window_id: stringProperty(WINDOW_ID_DESCRIPTION),
+        application_id: stringProperty(APPLICATION_ID_DESCRIPTION),
+        display_id: stringProperty(DISPLAY_ID_DESCRIPTION),
+        region: REGION_SCHEMA,
+        wait: booleanProperty('Poll until the text appears instead of failing immediately; mode "find" only.'),
+        timeout_ms: integerProperty('Polling timeout in milliseconds, 100-120000. Only valid with wait: true.'),
+        recognition_languages: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'OCR language hints, for example ["en-US"].',
         },
-        ['text'],
-      ),
+        custom_words: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Words to bias recognition toward, for example unusual names.',
+        },
+      }),
       output: {
         schema: {},
         render(_args, value) {
           const outcome = objectArgs(value)
-          const lines = [`OCR completed (${outcome.command_id ?? 'ocr'}).`]
+          const read = outcome.mode === 'read'
+          const lines = read
+            ? [`OCR read ${outcome.region_count ?? 0} text regions (${String(outcome.text ?? '').length} characters).`]
+            : [`OCR completed (${outcome.command_id ?? 'ocr'}).`]
           if (outcome.timed_out === true) lines.push('The text did not appear before timeout_ms expired.')
+          if (read && typeof outcome.text === 'string' && outcome.text !== '') {
+            const text = outcome.text
+            lines.push(`text:\n${text.length > 4_000 ? `${text.slice(0, 4_000)}\n… ${text.length - 4_000} more characters in result.text` : text}`)
+          }
           lines.push(warningsLine(outcome.warnings))
           if (typeof outcome.hint === 'string' && outcome.hint !== '') lines.push(outcome.hint)
-          lines.push('Matches are in "result"; use auv_click with text to click one.')
+          lines.push(read ? 'Regions with bounds are in result.regions; use auv_click with text to click one.' : 'Matches are in "result"; use auv_click with text to click one.')
           return renderResult(lines, value)
         },
       },
@@ -444,6 +478,16 @@ export function createTools() {
           ['screen', 'window', 'display'],
         ),
         button: enumProperty('Mouse button for x/y clicks; defaults to left.', ['left', 'right', 'middle']),
+        count: integerProperty('Number of clicks, 1-255; 2 is a double click. Defaults to 1.'),
+        modifiers: {
+          type: 'array',
+          items: { type: 'string', enum: ['cmd', 'shift', 'ctrl', 'alt'] },
+          description: 'Click modifiers held during the click: cmd, shift, ctrl and/or alt.',
+        },
+        window_strategy: enumProperty(
+          'How a window-targeted click is delivered; only valid with window_id/application_id.',
+          ['chromium-compatible', 'pid-targeted'],
+        ),
         within: WITHIN_SCHEMA,
         allow_repeat: booleanProperty(ALLOW_REPEAT_DESCRIPTION),
       }),
@@ -454,7 +498,10 @@ export function createTools() {
           if (blocked !== null) return blocked
           const outcome = objectArgs(value)
           const target = typeof outcome.target === 'string' && outcome.target !== '' ? ` via ${outcome.target}` : ''
-          const lines = [`Clicked${target} (${outcome.command_id ?? 'click'}).`]
+          const count = Number(outcome.count ?? 1)
+          const clicks = count > 1 ? ` ${count} times` : ''
+          const modifiers = Array.isArray(outcome.modifiers) && outcome.modifiers.length > 0 ? ` with ${outcome.modifiers.join('+')}` : ''
+          const lines = [`Clicked${target}${clicks}${modifiers} (${outcome.command_id ?? 'click'}).`]
           if (outcome.screen_point !== null && typeof outcome.screen_point === 'object') {
             lines.push(`screen_point: ${outcome.screen_point.x},${outcome.screen_point.y}`)
           }
@@ -483,6 +530,8 @@ export function createTools() {
         {
           text: stringProperty('Text to type or paste into the focused control.'),
           mode: enumProperty('"type" sends keystrokes; "paste" uses the clipboard and restores it.', ['type', 'paste']),
+          submit: enumProperty('Submit key pressed after the text; omit or "none" for no submit.', ['none', 'return', 'search', 'done', 'go']),
+          replace_existing: booleanProperty('Select the existing field content first so the text replaces it instead of appending.'),
           window_id: stringProperty(WINDOW_ID_DESCRIPTION),
           application_id: stringProperty(APPLICATION_ID_DESCRIPTION),
           policy: enumProperty('Delivery policy: foreground activates the app first; background modes do not.', [
@@ -501,6 +550,8 @@ export function createTools() {
           if (blocked !== null) return blocked
           const outcome = objectArgs(value)
           const lines = [`Text delivered (${outcome.command_id ?? 'input'}).`]
+          if (typeof outcome.submit === 'string' && outcome.submit !== 'none') lines.push(`submit: ${outcome.submit}`)
+          if (outcome.replace_existing === true) lines.push('Replaced the existing field content.')
           lines.push(warningsLine(outcome.warnings))
           return renderResult(lines, value)
         },
@@ -528,6 +579,7 @@ export function createTools() {
           },
           repeat: integerProperty('Number of complete presses, 1-255. Values above 1 require interval_ms.'),
           interval_ms: integerProperty('Delay in milliseconds between repeated presses; only used with repeat greater than 1 (default 50).'),
+          hold_ms: integerProperty('Hold the keys down for this many milliseconds before releasing (1-30000); cannot be combined with repeat.'),
           window_id: stringProperty(WINDOW_ID_DESCRIPTION),
           application_id: stringProperty(APPLICATION_ID_DESCRIPTION),
           policy: enumProperty(
@@ -548,7 +600,10 @@ export function createTools() {
           if (blocked !== null) return blocked
           const outcome = objectArgs(value)
           const target = typeof outcome.target === 'string' && outcome.target !== '' ? ` in ${outcome.target}` : ' in the foreground app'
-          const lines = [`Keys pressed${target} (${outcome.command_id ?? 'input.pressKeys'}).`]
+          const held = Number.isFinite(Number(outcome.hold_ms))
+            ? `Held keys${target} for ${outcome.hold_ms} ms (${outcome.command_id ?? 'input.holdKeys'}).`
+            : `Keys pressed${target} (${outcome.command_id ?? 'input.pressKeys'}).`
+          const lines = [held]
           if (typeof outcome.policy === 'string') lines.push(`policy: ${outcome.policy}`)
           lines.push(warningsLine(outcome.warnings))
           return renderResult(lines, value)
@@ -575,6 +630,10 @@ export function createTools() {
           window_id: stringProperty(WINDOW_ID_DESCRIPTION),
           x: numberProperty('X coordinate: window-local with window_id, otherwise screen coordinate.'),
           y: numberProperty('Y coordinate: window-local with window_id, otherwise screen coordinate.'),
+          smooth: booleanProperty('Animate the scroll over about 300 ms instead of one instant delta; requires window_id.'),
+          until_text: stringProperty(
+            'Keep scrolling in dy/dx steps until this text becomes visible, the viewport stops moving, or AUV runs out of steps; requires window_id.',
+          ),
           allow_repeat: booleanProperty(ALLOW_REPEAT_DESCRIPTION),
         },
         ['dy'],
@@ -585,7 +644,9 @@ export function createTools() {
           const blocked = renderRepeatBlocked(value)
           if (blocked !== null) return blocked
           const outcome = objectArgs(value)
-          const lines = [`Scrolled (${outcome.command_id ?? 'scroll'}).`]
+          const lines = [typeof outcome.until_text === 'string' && outcome.until_text !== ''
+            ? `Scrolled until "${outcome.until_text}" (${outcome.command_id ?? 'window.scrollUntil'}): ${outcome.reason ?? 'unknown'}, ${outcome.steps ?? '?'} steps${outcome.smooth === true ? ', animated' : ''}.`
+            : `Scrolled (${outcome.command_id ?? 'scroll'})${outcome.smooth === true ? ' with motion' : ''}.`]
           if (outcome.screen_point !== null && typeof outcome.screen_point === 'object') {
             lines.push(`screen_point: ${outcome.screen_point.x},${outcome.screen_point.y}`)
           }
@@ -770,6 +831,87 @@ export function createTools() {
         const plan = parseWindowsArgs(rawArgs)
         const sdk = await activeSdkTransport()
         return await sdk.windows(plan, exec, TOOL_TIMEOUT_MS)
+      },
+      timeoutMs: TOOL_TIMEOUT_MS,
+      isConcurrencySafe: () => false,
+    },
+
+    {
+      name: 'auv_window',
+      description: WINDOW_DESCRIPTION,
+      parameters: objectSchema(
+        {
+          window_id: stringProperty(WINDOW_ID_DESCRIPTION),
+          action: enumProperty(
+            'What to do with the window: focus, minimize, maximize, restore (normal), set_frame, or refresh (read only).',
+            ['focus', 'minimize', 'maximize', 'restore', 'set_frame', 'refresh'],
+          ),
+          frame: {
+            type: 'object',
+            properties: {
+              x: numberProperty('New left edge in logical screen points; pass x with y.'),
+              y: numberProperty('New top edge in logical screen points; pass y with x.'),
+              width: numberProperty('New width in logical points, greater than zero; pass width with height.'),
+              height: numberProperty('New height in logical points, greater than zero; pass height with width.'),
+            },
+            required: [],
+            additionalProperties: false,
+            description: 'New outer frame for action "set_frame"; pass x with y and/or width with height.',
+          },
+        },
+        ['window_id', 'action'],
+      ),
+      output: {
+        schema: {},
+        render(_args, value) {
+          const outcome = objectArgs(value)
+          const lines = [`Window ${outcome.window_id ?? '?'}: ${outcome.action ?? 'updated'} (${outcome.command_id ?? 'window'}).`]
+          if (outcome.before !== null && outcome.before !== undefined) lines.push(`before: ${windowSummaryLine(outcome.before)}`)
+          if (outcome.window !== null && outcome.window !== undefined) lines.push(`after: ${windowSummaryLine(outcome.window)}`)
+          lines.push(warningsLine(outcome.warnings))
+          return renderResult(lines, value)
+        },
+      },
+      async execute(rawArgs, exec) {
+        const plan = parseWindowArgs(rawArgs)
+        const sdk = await activeSdkTransport()
+        return await sdk.window(plan, exec, TOOL_TIMEOUT_MS)
+      },
+      timeoutMs: TOOL_TIMEOUT_MS,
+      isConcurrencySafe: () => false,
+    },
+
+    {
+      name: 'auv_displays',
+      description: DISPLAYS_DESCRIPTION,
+      parameters: objectSchema({}),
+      output: {
+        schema: {},
+        render(_args, value) {
+          const outcome = objectArgs(value)
+          const displays = Array.isArray(outcome.displays) ? outcome.displays : []
+          const lines = [`${displays.length} display${displays.length === 1 ? '' : 's'} listed.`]
+          for (const display of displays) {
+            const frame = display?.frame ?? {}
+            const origin = frame.origin ?? {}
+            const size = frame.size ?? {}
+            const geometry = [origin.x, origin.y, size.width, size.height].every((entry) => Number.isFinite(Number(entry)))
+              ? ` [${Number(origin.x)},${Number(origin.y)} ${Number(size.width)}×${Number(size.height)}]`
+              : ''
+            const flags = []
+            if (display?.is_primary === true) flags.push('primary')
+            if (display?.is_builtin === true) flags.push('built-in')
+            lines.push(
+              `- id ${display?.id ?? '?'} | ${display?.name ?? '(unnamed)'}${geometry}${flags.length > 0 ? ` | ${flags.join(', ')}` : ''}`,
+            )
+          }
+          return renderResult(lines, value)
+        },
+      },
+      async execute(_rawArgs, exec) {
+        const plan = parseDisplaysArgs()
+        const sdk = await activeSdkTransport()
+        return await sdk.displays(plan, exec, TOOL_TIMEOUT_MS)
       },
       timeoutMs: TOOL_TIMEOUT_MS,
       isConcurrencySafe: () => false,

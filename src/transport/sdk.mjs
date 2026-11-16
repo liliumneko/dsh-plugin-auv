@@ -22,10 +22,10 @@
  * re-attach or start again.
  */
 
-import { createHash, randomUUID } from 'node:crypto'
-import { mkdir, readdir, stat, unlink, writeFile } from 'node:fs/promises'
-import os from 'node:os'
-import path from 'node:path'
+import { createHash, randomUUID } from "node:crypto";
+import { mkdir, readdir, stat, unlink, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 
 import {
   AuvAbortError,
@@ -41,15 +41,21 @@ import {
   InputService,
   MouseButton,
   Position,
+  WindowStateTarget,
   connect,
   createAuv,
   discoverEndpoint,
   inputActionProgress,
   invokeUnary,
   startAuv,
-} from '@auv-js/sdk/node'
+} from "@auv-js/sdk/node";
 
-import { AuvError, clampTimeout, permissionHint, resolveAuvBinary } from '../auv.mjs'
+import {
+  AuvError,
+  clampTimeout,
+  permissionHint,
+  resolveAuvBinary,
+} from "../auv.mjs";
 import {
   CAPTURE_STATE_MAX_SIZE,
   COORDINATE_NOTE,
@@ -59,6 +65,10 @@ import {
   buildClickOptions,
   buildDragMovement,
   buildPressKeysRequest,
+  buildScrollMotion,
+  buildScrollUntilRequest,
+  buildTextOptions,
+  buildWindowFrame,
   captureTargetKey,
   captureTargetPlan,
   compareRgbaFrames,
@@ -71,6 +81,7 @@ import {
   mapActivateResult,
   mapCapturedFrame,
   mapDisplay,
+  mapRecognizeResult,
   mapTextMatches,
   mapWindowRow,
   messageOf,
@@ -82,98 +93,108 @@ import {
   rectCenter,
   screenPointFromDisplayPoint,
   screenPointFromWindowPoint,
+  scrollUntilReasonName,
   summarizePermissions,
   thumbhashOf,
   windowPointFromScreenPoint,
-} from './sdk-format.mjs'
+} from "./sdk-format.mjs";
 
 // ---------------------------------------------------------------------------
 // Constants / paths / environment
 // ---------------------------------------------------------------------------
 
-const RUNNER_CLASS = 'auv.core.local'
-const CAPTURE_MAX_SIZE = 2048
+const RUNNER_CLASS = "auv.core.local";
+const CAPTURE_MAX_SIZE = 2048;
 // Screenshots are temporary: they exist only so `read_image` can open the path
 // returned by a tool call. The default keeps one hour (and 200 files); both
 // limits can be overridden for long-running sessions.
-const CAPTURE_RETENTION_MS = 60 * 60 * 1000
-const CAPTURE_MAX_FILES = 200
+const CAPTURE_RETENTION_MS = 60 * 60 * 1000;
+const CAPTURE_MAX_FILES = 200;
 
 function envNonNegativeInteger(name, fallback) {
-  const raw = (process.env[name] ?? '').trim()
-  if (raw === '') return fallback
-  const value = Number(raw)
-  return Number.isFinite(value) && value >= 0 ? Math.floor(value) : fallback
+  const raw = (process.env[name] ?? "").trim();
+  if (raw === "") return fallback;
+  const value = Number(raw);
+  return Number.isFinite(value) && value >= 0 ? Math.floor(value) : fallback;
 }
 
 function captureRetentionMs() {
-  return envNonNegativeInteger('AUV_DSH_CAPTURE_RETENTION_MS', CAPTURE_RETENTION_MS)
+  return envNonNegativeInteger(
+    "AUV_DSH_CAPTURE_RETENTION_MS",
+    CAPTURE_RETENTION_MS,
+  );
 }
 
 function captureMaxFiles() {
-  return envNonNegativeInteger('AUV_DSH_CAPTURE_MAX_FILES', CAPTURE_MAX_FILES)
+  return envNonNegativeInteger("AUV_DSH_CAPTURE_MAX_FILES", CAPTURE_MAX_FILES);
 }
 
 // In-memory snapshots for `auv_capture_state` -> `auv_wait_for_change`
 // (pixel-ratio comparison). Bounded LRU + 5-minute TTL; never written to disk.
-const captureStateStore = createCaptureStateStore()
+const captureStateStore = createCaptureStateStore();
 const CAPTURE_STATE_INVALID_MESSAGE =
-  'The state_token is unknown or expired. Call auv_capture_state immediately before the action, then pass the new state_token to auv_wait_for_change.'
+  "The state_token is unknown or expired. Call auv_capture_state immediately before the action, then pass the new state_token to auv_wait_for_change.";
 
 /**
  * Resolve a `auv_capture_state` token without touching the transport.
  * Throws a clear `AuvError` when the token is unknown/expired.
  */
 export function requireCaptureState(token) {
-  const state = captureStateStore.get(token)
+  const state = captureStateStore.get(token);
   if (state === null) {
-    throw new AuvError(CAPTURE_STATE_INVALID_MESSAGE, { code: 'AUV_STATE_TOKEN_INVALID' })
+    throw new AuvError(CAPTURE_STATE_INVALID_MESSAGE, {
+      code: "AUV_STATE_TOKEN_INVALID",
+    });
   }
-  return state
+  return state;
 }
 
 /** Test-only: drop every stored capture-state snapshot. */
 export function resetCaptureStateStore() {
-  captureStateStore.clear()
+  captureStateStore.clear();
 }
-const DEFAULT_ATTACH_TIMEOUT_MS = 2_000
-const DEFAULT_STARTUP_TIMEOUT_MS = 15_000
-const DEFAULT_CONNECT_TIMEOUT_MS = 10_000
-const DEFAULT_HEALTH_TIMEOUT_MS = 5_000
+const DEFAULT_ATTACH_TIMEOUT_MS = 2_000;
+const DEFAULT_STARTUP_TIMEOUT_MS = 15_000;
+const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
+const DEFAULT_HEALTH_TIMEOUT_MS = 5_000;
 
 function dshHome() {
-  return (process.env.DSH_HOME ?? '').trim() || path.join(os.homedir(), '.dsh')
+  return (process.env.DSH_HOME ?? "").trim() || path.join(os.homedir(), ".dsh");
 }
 
 /** Owned-daemon store root: AUV_DSH_SDK_STORE_ROOT, else <DSH data>/auv/sdk. */
 export function sdkStoreRoot() {
-  const override = (process.env.AUV_DSH_SDK_STORE_ROOT ?? '').trim()
-  return override !== '' ? override : path.join(dshHome(), 'auv', 'sdk')
+  const override = (process.env.AUV_DSH_SDK_STORE_ROOT ?? "").trim();
+  return override !== "" ? override : path.join(dshHome(), "auv", "sdk");
 }
 
 /** Capture artifact directory: AUV_DSH_CAPTURE_DIR, else <DSH data>/auv/sdk-captures. */
 export function sdkCaptureRoot() {
-  const override = (process.env.AUV_DSH_CAPTURE_DIR ?? '').trim()
-  return override !== '' ? override : path.join(dshHome(), 'auv', 'sdk-captures')
+  const override = (process.env.AUV_DSH_CAPTURE_DIR ?? "").trim();
+  return override !== ""
+    ? override
+    : path.join(dshHome(), "auv", "sdk-captures");
 }
 
 /** First line of an error message, for compact diagnostics. */
 function firstLine(text) {
-  const value = typeof text === 'string' ? text : String(text ?? '')
-  const newline = value.indexOf('\n')
-  return newline === -1 ? value : value.slice(0, newline)
+  const value = typeof text === "string" ? text : String(text ?? "");
+  const newline = value.indexOf("\n");
+  return newline === -1 ? value : value.slice(0, newline);
 }
 
 function tail(text, limit) {
-  const value = typeof text === 'string' ? text : String(text ?? '')
-  return value.length <= limit ? value : `…${value.slice(value.length - limit)}`
+  const value = typeof text === "string" ? text : String(text ?? "");
+  return value.length <= limit
+    ? value
+    : `…${value.slice(value.length - limit)}`;
 }
 
 // ---------------------------------------------------------------------------
 // Global singleton state (HMR-safe)
 // ---------------------------------------------------------------------------
 
-const STATE_KEY = Symbol.for('@local/dsh-auv/sdk-transport.v2')
+const STATE_KEY = Symbol.for("@local/dsh-auv/sdk-transport.v2");
 
 /** Fresh transport state. Exported for the offline self-check. */
 export function createSdkTransportState() {
@@ -192,26 +213,27 @@ export function createSdkTransportState() {
     attachAttempted: false,
     attachError: null,
     lastError: null,
-  }
+  };
 }
 
 function getState() {
-  if (globalThis[STATE_KEY] === undefined) globalThis[STATE_KEY] = createSdkTransportState()
-  return globalThis[STATE_KEY]
+  if (globalThis[STATE_KEY] === undefined)
+    globalThis[STATE_KEY] = createSdkTransportState();
+  return globalThis[STATE_KEY];
 }
 
 /** Drop the client fields without closing anything (used on transport death). */
 function forgetTransport(shared, reason) {
-  shared.connection = null
-  shared.auv = null
-  shared.runner = null
-  shared.daemon = null
-  shared.mode = null
-  shared.endpoint = null
-  shared.daemonId = null
-  shared.pid = null
-  shared.transport = null
-  if (reason !== undefined) shared.lastError = reason
+  shared.connection = null;
+  shared.auv = null;
+  shared.runner = null;
+  shared.daemon = null;
+  shared.mode = null;
+  shared.endpoint = null;
+  shared.daemonId = null;
+  shared.pid = null;
+  shared.transport = null;
+  if (reason !== undefined) shared.lastError = reason;
 }
 
 // ---------------------------------------------------------------------------
@@ -225,30 +247,30 @@ export const SDK_DEPENDENCIES = Object.freeze({
   startAuv,
   discoverEndpoint,
   resolveBinary: resolveAuvBinary,
-})
+});
 
 function adoptTransport(shared, adopted) {
-  shared.connection = adopted.connection
-  shared.auv = adopted.auv
-  shared.runner = adopted.runner
-  shared.daemon = adopted.daemon
-  shared.mode = adopted.mode
-  shared.endpoint = adopted.endpoint
-  shared.daemonId = adopted.daemonId
-  shared.pid = adopted.pid
-  shared.lastError = null
-  const facade = createFacade(shared)
-  shared.transport = facade
+  shared.connection = adopted.connection;
+  shared.auv = adopted.auv;
+  shared.runner = adopted.runner;
+  shared.daemon = adopted.daemon;
+  shared.mode = adopted.mode;
+  shared.endpoint = adopted.endpoint;
+  shared.daemonId = adopted.daemonId;
+  shared.pid = adopted.pid;
+  shared.lastError = null;
+  const facade = createFacade(shared);
+  shared.transport = facade;
   if (adopted.daemon !== null) {
     // An owned daemon exiting must drop our client so the next call can start
     // (or attach to) a fresh one. The daemon handle itself is not ours to stop.
     const drop = () => {
-      if (shared.daemon !== adopted.daemon) return
-      forgetTransport(shared, 'The AUV daemon exited.')
-    }
-    adopted.daemon.exited.then(drop, drop)
+      if (shared.daemon !== adopted.daemon) return;
+      forgetTransport(shared, "The AUV daemon exited.");
+    };
+    adopted.daemon.exited.then(drop, drop);
   }
-  return facade
+  return facade;
 }
 
 /**
@@ -256,71 +278,81 @@ function adoptTransport(shared, adopted) {
  * Returns the facade on success or null when nothing discoverable is reachable.
  */
 async function tryAttach(shared, deps) {
-  let connection
+  let connection;
   try {
-    let endpoint = null
-    if (typeof deps.discoverEndpoint === 'function') {
+    let endpoint = null;
+    if (typeof deps.discoverEndpoint === "function") {
       try {
-        const discovered = await deps.discoverEndpoint()
-        if (discovered !== null && typeof discovered?.endpoint === 'string') endpoint = discovered.endpoint
+        const discovered = await deps.discoverEndpoint();
+        if (discovered !== null && typeof discovered?.endpoint === "string")
+          endpoint = discovered.endpoint;
       } catch {
         /* discovery failures resurface through connect() below */
       }
     }
-    connection = await deps.connect({ discover: true, signal: AbortSignal.timeout(DEFAULT_ATTACH_TIMEOUT_MS) })
-    const auv = deps.createAuv(connection)
-    const health = await auv.health.check({ signal: AbortSignal.timeout(DEFAULT_HEALTH_TIMEOUT_MS) })
-    const runner = auv.runner({ runnerClass: RUNNER_CLASS })
-    shared.attachError = null
-    void pruneCaptures().catch(() => {})
+    connection = await deps.connect({
+      discover: true,
+      signal: AbortSignal.timeout(DEFAULT_ATTACH_TIMEOUT_MS),
+    });
+    const auv = deps.createAuv(connection);
+    const health = await auv.health.check({
+      signal: AbortSignal.timeout(DEFAULT_HEALTH_TIMEOUT_MS),
+    });
+    const runner = auv.runner({ runnerClass: RUNNER_CLASS });
+    shared.attachError = null;
+    void pruneCaptures().catch(() => {});
     return adoptTransport(shared, {
-      mode: 'attached',
+      mode: "attached",
       connection,
       auv,
       runner,
       daemon: null,
       endpoint,
-      daemonId: typeof health?.id === 'string' ? health.id : null,
+      daemonId: typeof health?.id === "string" ? health.id : null,
       pid: null,
-    })
+    });
   } catch (error) {
     if (connection !== null && connection !== undefined) {
       try {
-        await connection.close()
+        await connection.close();
       } catch {
         /* ignore */
       }
     }
-    shared.attachError = firstLine(messageOf(error))
-    return null
+    shared.attachError = firstLine(messageOf(error));
+    return null;
   }
 }
 
 /** Start the plugin-owned private daemon (no discovery registration). */
 async function startOwnedDaemon(shared, deps) {
-  const binaryPath = deps.resolveBinary()
+  const binaryPath = deps.resolveBinary();
   const daemon = await deps.startAuv({
     binaryPath,
     storeRoot: sdkStoreRoot(),
     workingDirectory: os.homedir(),
     environment: { ...process.env },
     startupTimeoutMs: DEFAULT_STARTUP_TIMEOUT_MS,
-  })
+  });
 
-  let connection
+  let connection;
   try {
-    connection = await daemon.connect({ signal: AbortSignal.timeout(DEFAULT_CONNECT_TIMEOUT_MS) })
-    const auv = deps.createAuv(connection)
-    const health = await auv.health.check({ signal: AbortSignal.timeout(DEFAULT_HEALTH_TIMEOUT_MS) })
+    connection = await daemon.connect({
+      signal: AbortSignal.timeout(DEFAULT_CONNECT_TIMEOUT_MS),
+    });
+    const auv = deps.createAuv(connection);
+    const health = await auv.health.check({
+      signal: AbortSignal.timeout(DEFAULT_HEALTH_TIMEOUT_MS),
+    });
     if (health?.id !== daemon.id) {
       throw new AuvConfigurationError(
-        `AUV SDK health check returned daemon "${health?.id ?? 'unknown'}", expected "${daemon.id}".`,
-      )
+        `AUV SDK health check returned daemon "${health?.id ?? "unknown"}", expected "${daemon.id}".`,
+      );
     }
-    const runner = auv.runner({ runnerClass: RUNNER_CLASS })
-    void pruneCaptures().catch(() => {})
+    const runner = auv.runner({ runnerClass: RUNNER_CLASS });
+    void pruneCaptures().catch(() => {});
     return adoptTransport(shared, {
-      mode: 'owned',
+      mode: "owned",
       connection,
       auv,
       runner,
@@ -328,47 +360,56 @@ async function startOwnedDaemon(shared, deps) {
       endpoint: daemon.connectionOptions?.endpoint ?? null,
       daemonId: daemon.id,
       pid: daemon.pid ?? null,
-    })
+    });
   } catch (error) {
     try {
-      if (connection !== null && connection !== undefined) await connection.close()
+      if (connection !== null && connection !== undefined)
+        await connection.close();
     } catch {
       /* ignore */
     }
     try {
-      await daemon.stop()
+      await daemon.stop();
     } catch {
       /* ignore */
     }
-    throw error
+    throw error;
   }
 }
 
 /** Wrap a raw SDK init failure into the tool-facing `AuvError`. */
 function wrapInitError(shared, error) {
   if (error instanceof AuvError) {
-    if (shared.attachError === null) return error
+    if (shared.attachError === null) return error;
     return new AuvError(
       `${error.message}\n\nNo running AUV daemon was found to attach to (${shared.attachError}).`,
       { code: error.code },
-    )
+    );
   }
-  const parts = []
+  const parts = [];
   if (error instanceof AuvDaemonStartError) {
-    parts.push('The AUV SDK could not start its own `auv serve` daemon and no running daemon was discovered.')
-    parts.push(messageOf(error))
-    const output = typeof error.output === 'string' ? tail(error.output, 2_000) : ''
-    if (output.trim() !== '') parts.push(`Daemon output (tail):\n${output}`)
+    parts.push(
+      "The AUV SDK could not start its own `auv serve` daemon and no running daemon was discovered.",
+    );
+    parts.push(messageOf(error));
+    const output =
+      typeof error.output === "string" ? tail(error.output, 2_000) : "";
+    if (output.trim() !== "") parts.push(`Daemon output (tail):\n${output}`);
   } else {
-    parts.push(`The AUV SDK transport could not be initialized: ${messageOf(error)}`)
+    parts.push(
+      `The AUV SDK transport could not be initialized: ${messageOf(error)}`,
+    );
   }
-  if (shared.attachError !== null) parts.push(`Attach attempt: ${shared.attachError}`)
+  if (shared.attachError !== null)
+    parts.push(`Attach attempt: ${shared.attachError}`);
   parts.push(
-    'Install AUV (or start it with `auv serve`), grant macOS Accessibility/Screen Recording to DeepSeek Harness, then retry. Run auv_doctor for a diagnostic report.',
-  )
-  const message = parts.join('\n')
-  const hint = permissionHint(message)
-  return new AuvError(hint === undefined ? message : `${message}\n${hint}`, { code: 'AUV_SDK_INIT_FAILED' })
+    "Install AUV (or start it with `auv serve`), grant macOS Accessibility/Screen Recording to DeepSeek Harness, then retry. Run auv_doctor for a diagnostic report.",
+  );
+  const message = parts.join("\n");
+  const hint = permissionHint(message);
+  return new AuvError(hint === undefined ? message : `${message}\n${hint}`, {
+    code: "AUV_SDK_INIT_FAILED",
+  });
 }
 
 /**
@@ -382,13 +423,13 @@ function wrapInitError(shared, error) {
  * @param {object} [deps] SDK_DEPENDENCIES-shaped dependency set
  */
 export async function initializeSdkTransport(shared, deps = SDK_DEPENDENCIES) {
-  shared.attachAttempted = true
-  const attached = await tryAttach(shared, deps)
-  if (attached !== null) return attached
+  shared.attachAttempted = true;
+  const attached = await tryAttach(shared, deps);
+  if (attached !== null) return attached;
   try {
-    return await startOwnedDaemon(shared, deps)
+    return await startOwnedDaemon(shared, deps);
   } catch (error) {
-    throw wrapInitError(shared, error)
+    throw wrapInitError(shared, error);
   }
 }
 
@@ -403,42 +444,43 @@ export async function initializeSdkTransport(shared, deps = SDK_DEPENDENCIES) {
  * @throws {AuvError} when neither attach nor the owned daemon can start
  */
 export async function ensureSdkTransport() {
-  const shared = getState()
+  const shared = getState();
   if (shared.closing !== null) {
     try {
-      await shared.closing
+      await shared.closing;
     } catch {
       /* ignore */
     }
   }
-  if (shared.transport !== null) return shared.transport
+  if (shared.transport !== null) return shared.transport;
   if (shared.initPromise === null) {
     shared.initPromise = initializeSdkTransport(shared, SDK_DEPENDENCIES).then(
       (facade) => {
-        shared.initPromise = null
-        return facade
+        shared.initPromise = null;
+        return facade;
       },
       (error) => {
-        shared.initPromise = null
-        const wrapped = error instanceof AuvError ? error : wrapInitError(shared, error)
-        shared.lastError = firstLine(wrapped.message)
-        throw wrapped
+        shared.initPromise = null;
+        const wrapped =
+          error instanceof AuvError ? error : wrapInitError(shared, error);
+        shared.lastError = firstLine(wrapped.message);
+        throw wrapped;
       },
-    )
+    );
   }
-  return await shared.initPromise
+  return await shared.initPromise;
 }
 
 /** Tool-facing alias: ensure the transport (attach first) and return the facade. */
 export async function activeSdkTransport() {
-  return await ensureSdkTransport()
+  return await ensureSdkTransport();
 }
 
 /** Return the started facade without initializing anything, or null. */
 export function sdkTransportIfStarted() {
-  const shared = globalThis[STATE_KEY]
-  if (shared === undefined) return null
-  return shared.transport ?? null
+  const shared = globalThis[STATE_KEY];
+  if (shared === undefined) return null;
+  return shared.transport ?? null;
 }
 
 /**
@@ -446,55 +488,55 @@ export function sdkTransportIfStarted() {
  * when this plugin started (owns) it. Idempotent.
  */
 export async function disposeSdkTransport() {
-  const shared = globalThis[STATE_KEY]
-  if (shared === undefined) return
-  await disposeTransportState(shared)
+  const shared = globalThis[STATE_KEY];
+  if (shared === undefined) return;
+  await disposeTransportState(shared);
 }
 
 /** Dispose a specific transport state object. Exported for the offline self-check. */
 export async function disposeTransportState(shared) {
   if (shared.closing !== null) {
     try {
-      await shared.closing
+      await shared.closing;
     } catch {
       /* ignore */
     }
-    return
+    return;
   }
   shared.closing = (async () => {
     if (shared.initPromise !== null) {
       try {
-        await shared.initPromise
+        await shared.initPromise;
       } catch {
         /* an init failure has nothing to clean up */
       }
     }
-    const connection = shared.connection
-    const daemon = shared.mode === 'owned' ? shared.daemon : null
-    forgetTransport(shared)
-    shared.initPromise = null
-    shared.attachAttempted = false
-    shared.attachError = null
-    shared.lastError = null
+    const connection = shared.connection;
+    const daemon = shared.mode === "owned" ? shared.daemon : null;
+    forgetTransport(shared);
+    shared.initPromise = null;
+    shared.attachAttempted = false;
+    shared.attachError = null;
+    shared.lastError = null;
     if (connection !== null) {
       try {
-        await connection.close()
+        await connection.close();
       } catch {
         /* ignore */
       }
     }
     if (daemon !== null) {
       try {
-        await daemon.stop()
+        await daemon.stop();
       } catch {
         /* ignore */
       }
     }
-  })()
+  })();
   try {
-    await shared.closing
+    await shared.closing;
   } finally {
-    shared.closing = null
+    shared.closing = null;
   }
 }
 
@@ -507,7 +549,7 @@ export async function disposeTransportState(shared) {
  *            storeRoot: string, captureRoot: string}}
  */
 export function sdkTransportStatus() {
-  const shared = globalThis[STATE_KEY]
+  const shared = globalThis[STATE_KEY];
   return {
     started: shared?.transport != null,
     mode: shared?.mode ?? null,
@@ -519,12 +561,12 @@ export function sdkTransportStatus() {
     lastError: shared?.lastError ?? null,
     storeRoot: sdkStoreRoot(),
     captureRoot: sdkCaptureRoot(),
-  }
+  };
 }
 
 /** Test-only: forget the singleton without touching any daemon. */
 export function resetSdkTransportState() {
-  delete globalThis[STATE_KEY]
+  delete globalThis[STATE_KEY];
 }
 
 // ---------------------------------------------------------------------------
@@ -532,26 +574,32 @@ export function resetSdkTransportState() {
 // ---------------------------------------------------------------------------
 
 async function writeCaptureFile(image, capture) {
-  const directory = sdkCaptureRoot()
-  await mkdir(directory, { recursive: true })
-  const captureId = typeof capture?.ref?.captureId === 'string' ? capture.ref.captureId.replace(/[^a-zA-Z0-9._-]/gu, '_') : 'capture'
-  const filePath = path.join(directory, `${Date.now()}-${captureId}-${randomUUID().slice(0, 8)}.webp`)
-  await writeFile(filePath, image.data)
+  const directory = sdkCaptureRoot();
+  await mkdir(directory, { recursive: true });
+  const captureId =
+    typeof capture?.ref?.captureId === "string"
+      ? capture.ref.captureId.replace(/[^a-zA-Z0-9._-]/gu, "_")
+      : "capture";
+  const filePath = path.join(
+    directory,
+    `${Date.now()}-${captureId}-${randomUUID().slice(0, 8)}.webp`,
+  );
+  await writeFile(filePath, image.data);
   // A new artifact is the natural moment to drop stale ones; keep this off the
   // tool's critical path and ignore cleanup errors.
-  void pruneCaptures().catch(() => {})
-  return filePath
+  void pruneCaptures().catch(() => {});
+  return filePath;
 }
 
 function captureArtifactRecord(image, filePath) {
   return {
-    purpose: 'auv.driver.capture',
-    content_type: 'image/webp',
-    file_extension: 'webp',
+    purpose: "auv.driver.capture",
+    content_type: "image/webp",
+    file_extension: "webp",
     byte_length: image.data.byteLength,
-    sha256: createHash('sha256').update(image.data).digest('hex'),
+    sha256: createHash("sha256").update(image.data).digest("hex"),
     file_path: filePath,
-  }
+  };
 }
 
 /**
@@ -566,37 +614,37 @@ export async function pruneCaptures({
   maxFiles = captureMaxFiles(),
   now = Date.now(),
 } = {}) {
-  let entries
+  let entries;
   try {
-    entries = await readdir(directory)
+    entries = await readdir(directory);
   } catch {
-    return { deleted: 0, kept: 0 }
+    return { deleted: 0, kept: 0 };
   }
-  const files = []
+  const files = [];
   for (const entry of entries) {
-    if (!entry.endsWith('.webp')) continue
-    const filePath = path.join(directory, entry)
+    if (!entry.endsWith(".webp")) continue;
+    const filePath = path.join(directory, entry);
     try {
-      const info = await stat(filePath)
-      files.push({ filePath, mtimeMs: info.mtimeMs })
+      const info = await stat(filePath);
+      files.push({ filePath, mtimeMs: info.mtimeMs });
     } catch {
       /* ignore individual races */
     }
   }
-  files.sort((a, b) => b.mtimeMs - a.mtimeMs)
-  let deleted = 0
+  files.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  let deleted = 0;
   for (const [index, file] of files.entries()) {
-    const tooOld = retentionMs > 0 && now - file.mtimeMs > retentionMs
-    const beyondCap = maxFiles > 0 && index >= maxFiles
-    if (!tooOld && !beyondCap) continue
+    const tooOld = retentionMs > 0 && now - file.mtimeMs > retentionMs;
+    const beyondCap = maxFiles > 0 && index >= maxFiles;
+    if (!tooOld && !beyondCap) continue;
     try {
-      await unlink(file.filePath)
-      deleted += 1
+      await unlink(file.filePath);
+      deleted += 1;
     } catch {
       /* ignore individual file races */
     }
   }
-  return { deleted, kept: files.length - deleted }
+  return { deleted, kept: files.length - deleted };
 }
 
 // ---------------------------------------------------------------------------
@@ -604,27 +652,28 @@ export async function pruneCaptures({
 // ---------------------------------------------------------------------------
 
 function combineSignals(first, second) {
-  if (first === undefined) return second
-  if (second === undefined) return first
-  if (typeof AbortSignal.any === 'function') return AbortSignal.any([first, second])
-  const controller = new AbortController()
-  const onAbort = (event) => controller.abort(event?.target?.reason)
+  if (first === undefined) return second;
+  if (second === undefined) return first;
+  if (typeof AbortSignal.any === "function")
+    return AbortSignal.any([first, second]);
+  const controller = new AbortController();
+  const onAbort = (event) => controller.abort(event?.target?.reason);
   if (first.aborted || second.aborted) {
-    controller.abort(first.aborted ? first.reason : second.reason)
-    return controller.signal
+    controller.abort(first.aborted ? first.reason : second.reason);
+    return controller.signal;
   }
-  first.addEventListener('abort', onAbort, { once: true })
-  second.addEventListener('abort', onAbort, { once: true })
-  return controller.signal
+  first.addEventListener("abort", onAbort, { once: true });
+  second.addEventListener("abort", onAbort, { once: true });
+  return controller.signal;
 }
 
 function beginCall(execSignal, timeoutMs) {
-  const timeout = AbortSignal.timeout(clampTimeout(timeoutMs))
+  const timeout = AbortSignal.timeout(clampTimeout(timeoutMs));
   return {
     signal: combineSignals(execSignal, timeout),
     timeout,
     timedOut: () => timeout.aborted,
-  }
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -632,59 +681,67 @@ function beginCall(execSignal, timeoutMs) {
 // ---------------------------------------------------------------------------
 
 const RPC_NAME_HINTS = {
-  3: { name: 'INVALID_ARGUMENT', code: 'AUV_INVALID_ARGUMENT' },
+  3: { name: "INVALID_ARGUMENT", code: "AUV_INVALID_ARGUMENT" },
   5: {
-    name: 'NOT_FOUND',
-    code: 'AUV_NOT_FOUND',
-    hint: 'The window id or capture reference may be stale. Call auv_windows to refresh window ids and retry; AUV capture references expire quickly.',
+    name: "NOT_FOUND",
+    code: "AUV_NOT_FOUND",
+    hint: "The window id or capture reference may be stale. Call auv_windows to refresh window ids and retry; AUV capture references expire quickly.",
   },
   7: {
-    name: 'PERMISSION_DENIED',
-    code: 'AUV_PERMISSION_DENIED',
+    name: "PERMISSION_DENIED",
+    code: "AUV_PERMISSION_DENIED",
     hint: 'Run auv_doctor, then grant Accessibility and Screen Recording to DeepSeek Harness in System Settings → Privacy & Security (macOS 27+ merges them under "Device Control and Data Access") and restart the app.',
   },
   9: {
-    name: 'FAILED_PRECONDITION',
-    code: 'AUV_FAILED_PRECONDITION',
-    hint: 'The target window may be minimized or full screen. Restore or focus it first (for example with auv_windows to find a visible window, then auv_activate).',
+    name: "FAILED_PRECONDITION",
+    code: "AUV_FAILED_PRECONDITION",
+    hint: "The target window may be minimized or full screen. Restore or focus it first (for example with auv_windows to find a visible window, then auv_activate).",
   },
-  10: { name: 'ABORTED', code: 'ABORTED' },
+  10: { name: "ABORTED", code: "ABORTED" },
   12: {
-    name: 'UNIMPLEMENTED',
-    code: 'AUV_UNIMPLEMENTED',
-    hint: 'This Runner platform does not implement the operation (for example scrolling without a target window on macOS). Pass window_id instead.',
+    name: "UNIMPLEMENTED",
+    code: "AUV_UNIMPLEMENTED",
+    hint: "This Runner platform does not implement the operation (for example scrolling without a target window on macOS). Pass window_id instead.",
   },
   13: {
-    name: 'INTERNAL',
-    code: 'AUV_INTERNAL',
-    hint: 'The AUV Runner hit a native failure. For screen text/OCR failures, confirm Screen Recording is granted and restart DeepSeek Harness; auv_doctor reports the permission state.',
+    name: "INTERNAL",
+    code: "AUV_INTERNAL",
+    hint: "The AUV Runner hit a native failure. For screen text/OCR failures, confirm Screen Recording is granted and restart DeepSeek Harness; auv_doctor reports the permission state.",
   },
   14: {
-    name: 'UNAVAILABLE',
-    code: 'AUV_UNAVAILABLE',
-    hint: 'The AUV daemon may have stopped. The next tool call attaches to a running daemon or starts one again; run auv_doctor if this persists.',
+    name: "UNAVAILABLE",
+    code: "AUV_UNAVAILABLE",
+    hint: "The AUV daemon may have stopped. The next tool call attaches to a running daemon or starts one again; run auv_doctor if this persists.",
   },
-}
+};
 
 function inputProgressHint(error) {
   try {
-    const progress = inputActionProgress(error)
-    if (progress === undefined || progress === null) return null
-    if (progress.case === 'deliveryUncertain') return 'The input was interrupted but may already have been delivered; verify the target state before retrying.'
-    if (progress.case === 'submitted') return 'AUV submitted the input but could not verify its effect; verify the target state before retrying.'
-    return null
+    const progress = inputActionProgress(error);
+    if (progress === undefined || progress === null) return null;
+    if (progress.case === "deliveryUncertain")
+      return "The input was interrupted but may already have been delivered; verify the target state before retrying.";
+    if (progress.case === "submitted")
+      return "AUV submitted the input but could not verify its effect; verify the target state before retrying.";
+    return null;
   } catch {
-    return null
+    return null;
   }
 }
 
-/** Whether an SDK error means the daemon/connection itself is gone. */
+/**
+ * Whether an SDK error means the daemon/connection itself is gone.
+ *
+ * A per-call RPC failure (NOT_FOUND, INVALID_ARGUMENT, PERMISSION_DENIED, …)
+ * must not tear down a healthy daemon: only transport/protocol failures and
+ * UNAVAILABLE do. `AuvRemoteError` is their base class, so it is not a signal
+ * by itself.
+ */
 function isDeadTransport(error) {
-  if (error instanceof AuvTransportError) return true
-  if (error instanceof AuvProtocolError) return true
-  if (error instanceof AuvRemoteError) return true
-  if (error instanceof AuvRpcError) return error.rpcCode === 14
-  return false
+  if (error instanceof AuvTransportError) return true;
+  if (error instanceof AuvProtocolError) return true;
+  if (error instanceof AuvRpcError) return error.rpcCode === 14;
+  return false;
 }
 
 /**
@@ -692,45 +749,54 @@ function isDeadTransport(error) {
  * Only when the transport that failed is still the active one.
  */
 function invalidateDeadTransport(context, message) {
-  const shared = context.shared
-  if (shared.runner !== context.runner) return
-  const connection = shared.connection
-  const daemon = shared.mode === 'owned' ? shared.daemon : null
-  forgetTransport(shared, firstLine(message))
+  const shared = context.shared;
+  if (shared.runner !== context.runner) return;
+  const connection = shared.connection;
+  const daemon = shared.mode === "owned" ? shared.daemon : null;
+  forgetTransport(shared, firstLine(message));
   if (connection !== null) {
-    void connection.close().catch(() => {})
+    void connection.close().catch(() => {});
   }
   if (daemon !== null) {
-    void daemon.stop().catch(() => {})
+    void daemon.stop().catch(() => {});
   }
 }
 
 /** Map an SDK error into the tool-facing `AuvError`, dropping dead transports. */
 function fail(context, error, operation, call) {
-  const mapped = mapSdkError(error, operation, call)
-  if (isDeadTransport(error)) invalidateDeadTransport(context, mapped.message)
-  return mapped
+  const mapped = mapSdkError(error, operation, call);
+  if (isDeadTransport(error)) invalidateDeadTransport(context, mapped.message);
+  return mapped;
 }
 
 function mapSdkError(error, operation, call) {
-  if (error instanceof AuvError) return error
-  if (error instanceof AuvAbortError || error?.name === 'AuvAbortError') {
+  if (error instanceof AuvError) return error;
+  if (error instanceof AuvAbortError || error?.name === "AuvAbortError") {
     if (call !== undefined && call.timedOut()) {
-      return new AuvError(`AUV ${operation} timed out. The AUV SDK daemon did not finish in time; retry or narrow the request.`, {
-        code: 'AUV_TIMEOUT',
-      })
+      return new AuvError(
+        `AUV ${operation} timed out. The AUV SDK daemon did not finish in time; retry or narrow the request.`,
+        {
+          code: "AUV_TIMEOUT",
+        },
+      );
     }
-    return new AuvError(`AUV ${operation} call was aborted.`, { code: 'ABORTED' })
+    return new AuvError(`AUV ${operation} call was aborted.`, {
+      code: "ABORTED",
+    });
   }
   if (error instanceof AuvRpcError) {
-    const details = RPC_NAME_HINTS[error.rpcCode]
-    const name = details?.name ?? 'UNKNOWN'
-    const parts = [`AUV ${operation} failed: ${messageOf(error)} (rpc ${error.rpcCode} ${name})`]
-    const hint = permissionHint(messageOf(error)) ?? details?.hint
-    if (hint !== undefined && hint !== null) parts.push(hint)
-    const progressHint = inputProgressHint(error)
-    if (progressHint !== null) parts.push(progressHint)
-    return new AuvError(parts.join('\n'), { code: details?.code ?? 'AUV_RPC_ERROR' })
+    const details = RPC_NAME_HINTS[error.rpcCode];
+    const name = details?.name ?? "UNKNOWN";
+    const parts = [
+      `AUV ${operation} failed: ${messageOf(error)} (rpc ${error.rpcCode} ${name})`,
+    ];
+    const hint = permissionHint(messageOf(error)) ?? details?.hint;
+    if (hint !== undefined && hint !== null) parts.push(hint);
+    const progressHint = inputProgressHint(error);
+    if (progressHint !== null) parts.push(progressHint);
+    return new AuvError(parts.join("\n"), {
+      code: details?.code ?? "AUV_RPC_ERROR",
+    });
   }
   if (
     error instanceof AuvDaemonStartError ||
@@ -739,9 +805,14 @@ function mapSdkError(error, operation, call) {
     error instanceof AuvProtocolError ||
     error instanceof AuvRemoteError
   ) {
-    return new AuvError(`AUV SDK transport error during ${operation}: ${messageOf(error)}`, { code: 'AUV_SDK_ERROR' })
+    return new AuvError(
+      `AUV SDK transport error during ${operation}: ${messageOf(error)}`,
+      { code: "AUV_SDK_ERROR" },
+    );
   }
-  return new AuvError(`AUV ${operation} failed: ${messageOf(error)}`, { code: 'AUV_SDK_ERROR' })
+  return new AuvError(`AUV ${operation} failed: ${messageOf(error)}`, {
+    code: "AUV_SDK_ERROR",
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -749,28 +820,37 @@ function mapSdkError(error, operation, call) {
 // ---------------------------------------------------------------------------
 
 function inputPolicyValue(policy) {
-  if (policy === undefined) return undefined
-  return INPUT_POLICY_VALUES[policy]
+  if (policy === undefined) return undefined;
+  return INPUT_POLICY_VALUES[policy];
 }
 
-const MOUSE_BUTTONS = { left: MouseButton.LEFT, right: MouseButton.RIGHT, middle: MouseButton.MIDDLE }
+const MOUSE_BUTTONS = {
+  left: MouseButton.LEFT,
+  right: MouseButton.RIGHT,
+  middle: MouseButton.MIDDLE,
+};
 
 /** Standard completed tool value, annotated with daemon ownership diagnostics. */
 function completedValue(context, commandId, extra = {}) {
   return {
     run_id: null,
     command_id: commandId,
-    status: 'completed',
+    status: "completed",
     daemon_mode: context.mode,
     daemon_endpoint: context.endpoint,
     ...extra,
-  }
+  };
 }
 
 async function resolveWindowClient(context, plan, signal) {
-  if (plan.windowId !== undefined) return await context.runner.windows.get(plan.windowId, { signal })
-  if (plan.applicationId !== undefined) return await context.runner.windows.resolve({ applicationId: plan.applicationId }, { signal })
-  return null
+  if (plan.windowId !== undefined)
+    return await context.runner.windows.get(plan.windowId, { signal });
+  if (plan.applicationId !== undefined)
+    return await context.runner.windows.resolve(
+      { applicationId: plan.applicationId },
+      { signal },
+    );
+  return null;
 }
 
 /**
@@ -780,62 +860,75 @@ async function resolveWindowClient(context, plan, signal) {
  */
 async function captureTarget(context, plan, signal) {
   if (plan.windowId !== undefined || plan.applicationId !== undefined) {
-    const client = await resolveWindowClient(context, plan, signal)
-    const response = await client.capture({ resolution: CaptureResolution.LOGICAL, signal })
+    const client = await resolveWindowClient(context, plan, signal);
+    const response = await client.capture({
+      resolution: CaptureResolution.LOGICAL,
+      signal,
+    });
     return {
-      mode: 'window',
-      commandId: 'window.capture',
+      mode: "window",
+      commandId: "window.capture",
       client,
       window: response.window ?? client.window ?? null,
       windowFrame: response.window?.frame ?? client.window?.frame ?? null,
       display: response.display ?? null,
       capture: response.capture,
-    }
+    };
   }
   if (plan.region !== undefined) {
-    const selector = plan.displayId !== undefined ? displaySelector(plan.displayId) : undefined
-    const response = await context.runner.displays.captureRegion(plan.region, selector, {
-      resolution: CaptureResolution.LOGICAL,
-      signal,
-    })
+    const selector =
+      plan.displayId !== undefined
+        ? displaySelector(plan.displayId)
+        : undefined;
+    const response = await context.runner.displays.captureRegion(
+      plan.region,
+      selector,
+      {
+        resolution: CaptureResolution.LOGICAL,
+        signal,
+      },
+    );
     return {
-      mode: 'region',
-      commandId: 'display.captureRegion',
+      mode: "region",
+      commandId: "display.captureRegion",
       client: null,
       window: response.window ?? null,
       windowFrame: null,
       display: response.display ?? null,
       capture: response.capture,
-    }
+    };
   }
   if (plan.displayId !== undefined) {
-    const response = await context.runner.displays.capture(displaySelector(plan.displayId), {
-      resolution: CaptureResolution.LOGICAL,
-      signal,
-    })
+    const response = await context.runner.displays.capture(
+      displaySelector(plan.displayId),
+      {
+        resolution: CaptureResolution.LOGICAL,
+        signal,
+      },
+    );
     return {
-      mode: 'display',
-      commandId: 'display.capture',
+      mode: "display",
+      commandId: "display.capture",
       client: null,
       window: response.window ?? null,
       windowFrame: null,
       display: response.display ?? null,
       capture: response.capture,
-    }
+    };
   }
   const response = await context.runner.displays.capture(undefined, {
     resolution: CaptureResolution.LOGICAL,
     signal,
-  })
+  });
   return {
-    mode: 'screen',
-    commandId: 'display.capture',
+    mode: "screen",
+    commandId: "display.capture",
     client: null,
     window: response.window ?? null,
     windowFrame: null,
     display: response.display ?? null,
     capture: response.capture,
-  }
+  };
 }
 
 /**
@@ -845,49 +938,74 @@ async function captureTarget(context, plan, signal) {
  */
 async function resolveCaptureSource(context, plan, signal) {
   if (plan.windowId !== undefined || plan.applicationId !== undefined) {
-    const client = await resolveWindowClient(context, plan, signal)
+    const client = await resolveWindowClient(context, plan, signal);
     return {
-      mode: 'window',
+      mode: "window",
       windowFrame: client.window?.frame ?? null,
-      capture: async () => (await client.capture({ resolution: CaptureResolution.LOGICAL, signal })).capture,
-    }
+      capture: async () =>
+        (
+          await client.capture({
+            resolution: CaptureResolution.LOGICAL,
+            signal,
+          })
+        ).capture,
+    };
   }
   if (plan.region !== undefined) {
-    const selector = plan.displayId !== undefined ? displaySelector(plan.displayId) : undefined
+    const selector =
+      plan.displayId !== undefined
+        ? displaySelector(plan.displayId)
+        : undefined;
     return {
-      mode: 'region',
+      mode: "region",
       windowFrame: null,
       capture: async () =>
-        (await context.runner.displays.captureRegion(plan.region, selector, { resolution: CaptureResolution.LOGICAL, signal }))
-          .capture,
-    }
+        (
+          await context.runner.displays.captureRegion(plan.region, selector, {
+            resolution: CaptureResolution.LOGICAL,
+            signal,
+          })
+        ).capture,
+    };
   }
   if (plan.displayId !== undefined) {
     return {
-      mode: 'display',
+      mode: "display",
       windowFrame: null,
       capture: async () =>
-        (await context.runner.displays.capture(displaySelector(plan.displayId), {
-          resolution: CaptureResolution.LOGICAL,
-          signal,
-        })).capture,
-    }
+        (
+          await context.runner.displays.capture(
+            displaySelector(plan.displayId),
+            {
+              resolution: CaptureResolution.LOGICAL,
+              signal,
+            },
+          )
+        ).capture,
+    };
   }
   return {
-    mode: 'screen',
+    mode: "screen",
     windowFrame: null,
     capture: async () =>
-      (await context.runner.displays.capture(undefined, { resolution: CaptureResolution.LOGICAL, signal })).capture,
-  }
+      (
+        await context.runner.displays.capture(undefined, {
+          resolution: CaptureResolution.LOGICAL,
+          signal,
+        })
+      ).capture,
+  };
 }
 
 async function screenshot(context, plan, exec, timeoutMs) {
-  const call = beginCall(exec?.signal, timeoutMs)
+  const call = beginCall(exec?.signal, timeoutMs);
   try {
-    const warnings = []
-    const captured = await captureTarget(context, plan, call.signal)
+    const warnings = [];
+    const captured = await captureTarget(context, plan, call.signal);
     if (plan.applicationId !== undefined) {
-      warnings.push("Capturing the application's main visible window; pass window_id to choose a specific window.")
+      warnings.push(
+        "Capturing the application's main visible window; pass window_id to choose a specific window.",
+      );
     }
 
     // Fetch pixels in this same call: capture refs are evicted/expired later.
@@ -895,125 +1013,238 @@ async function screenshot(context, plan, exec, timeoutMs) {
       encoding: ImageEncoding.WEBP,
       maxSize: { width: CAPTURE_MAX_SIZE, height: CAPTURE_MAX_SIZE },
       signal: call.signal,
-    })
-    const artifactPath = await writeCaptureFile(image, captured.capture)
-    const resultCapture = mapCapturedFrame(captured.capture)
-    const capturePixelSize = resultCapture?.pixel_dimensions ?? null
-    if (resultCapture !== null) resultCapture.pixel_dimensions = { height: image.height, width: image.width }
-    const result = { capture: resultCapture }
+    });
+    const artifactPath = await writeCaptureFile(image, captured.capture);
+    const resultCapture = mapCapturedFrame(captured.capture);
+    const capturePixelSize = resultCapture?.pixel_dimensions ?? null;
+    if (resultCapture !== null)
+      resultCapture.pixel_dimensions = {
+        height: image.height,
+        width: image.width,
+      };
+    const result = { capture: resultCapture };
     if (captured.window !== null) {
-      result.window = mapWindowRow(captured.window, captured.window.ref?.windowId)
+      result.window = mapWindowRow(
+        captured.window,
+        captured.window.ref?.windowId,
+      );
     }
-    if (captured.display !== null) result.display = mapDisplay(captured.display)
+    if (captured.display !== null)
+      result.display = mapDisplay(captured.display);
     return completedValue(context, captured.commandId, {
       artifact_path: artifactPath,
-      content_type: 'image/webp',
+      content_type: "image/webp",
       width: image.width,
       height: image.height,
       bounds: resultCapture?.bounds ?? null,
       origin: resultCapture?.bounds?.origin ?? null,
       scale_factor: resultCapture?.scale_factor ?? null,
-      pixel_size: capturePixelSize ?? { height: image.height, width: image.width },
+      pixel_size: capturePixelSize ?? {
+        height: image.height,
+        width: image.width,
+      },
       coordinate_note: COORDINATE_NOTE,
       result,
       artifacts: [captureArtifactRecord(image, artifactPath)],
       warnings,
-    })
+    });
   } catch (error) {
-    throw fail(context, error, 'screenshot', call)
+    throw fail(context, error, "screenshot", call);
   }
 }
 
 function sleep(ms, signal) {
   return new Promise((resolve) => {
     if (signal?.aborted === true) {
-      resolve()
-      return
+      resolve();
+      return;
     }
     const cleanup = () => {
-      clearTimeout(timer)
-      signal?.removeEventListener('abort', onAbort)
-    }
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+    };
     const onAbort = () => {
-      cleanup()
-      resolve()
-    }
-    const timer = setTimeout(() => {
-      cleanup()
-      resolve()
-    }, Math.max(0, ms))
-    signal?.addEventListener('abort', onAbort, { once: true })
-  })
+      cleanup();
+      resolve();
+    };
+    const timer = setTimeout(
+      () => {
+        cleanup();
+        resolve();
+      },
+      Math.max(0, ms),
+    );
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
+/**
+ * OCR: `mode: "find"` searches one literal string (optionally polling until it
+ * appears); `mode: "read"` captures the target and returns every recognized text
+ * region through `runner.recognizeText`. Both modes pass `customWords` /
+ * `recognitionLanguages`, and a screen-space `region` restricts the search.
+ */
 async function ocr(context, plan, exec, timeoutMs) {
-  const call = beginCall(exec?.signal, timeoutMs)
-  const windowed = plan.windowId !== undefined || plan.applicationId !== undefined
-  const commandId = windowed ? (plan.wait ? 'window.waitForText' : 'window.findText') : plan.wait ? 'display.waitForText' : 'display.findText'
+  const call = beginCall(exec?.signal, timeoutMs);
+  const windowed =
+    plan.windowId !== undefined || plan.applicationId !== undefined;
+  const read = plan.mode === "read";
+  const commandId = read
+    ? windowed
+      ? "window.recognizeText"
+      : "display.recognizeText"
+    : windowed
+      ? plan.wait
+        ? "window.waitForText"
+        : "window.findText"
+      : plan.wait
+        ? "display.waitForText"
+        : "display.findText";
+  const ocrOptions = { signal: call.signal };
+  if (plan.customWords !== undefined) ocrOptions.customWords = plan.customWords;
+  if (plan.recognitionLanguages !== undefined)
+    ocrOptions.recognitionLanguages = plan.recognitionLanguages;
   try {
-    const client = await resolveWindowClient(context, plan, call.signal)
-    const findOnce = async () => {
-      const options = { signal: call.signal }
-      if (client !== null) return await client.findText(plan.text, options)
-      return await context.runner.displays.findText(undefined, plan.text, options)
+    if (read) {
+      const captured = await captureTarget(context, plan, call.signal);
+      const response = await context.runner.recognizeText(
+        captured.capture,
+        ocrOptions,
+      );
+      const result = mapRecognizeResult(
+        response,
+        captured.capture,
+        captured.windowFrame,
+      );
+      if (captured.capture !== undefined && captured.capture !== null)
+        result.capture = mapCapturedFrame(captured.capture);
+      if (captured.display !== null)
+        result.display = mapDisplay(captured.display);
+      if (captured.window !== null)
+        result.window = mapWindowRow(
+          captured.window,
+          captured.window.ref?.windowId,
+        );
+      return completedValue(context, commandId, {
+        mode: "read",
+        capture_mode: captured.mode,
+        result,
+        text: result.text,
+        region_count: result.regions.length,
+        warnings: [],
+        timed_out: false,
+        coordinate_note: COORDINATE_NOTE,
+      });
     }
-    let response = await findOnce()
-    let timedOut = false
-    if (plan.wait && response.matches.length === 0) {
-      const deadline = Date.now() + (plan.timeoutMs ?? 10_000)
-      while (!call.signal.aborted && response.matches.length === 0 && Date.now() < deadline) {
-        await sleep(Math.min(250, Math.max(1, deadline - Date.now())), call.signal)
-        if (call.signal.aborted) break
-        response = await findOnce()
+    const client = await resolveWindowClient(context, plan, call.signal);
+    const findOnce = async () => {
+      const options = { ...ocrOptions };
+      if (plan.region !== undefined) options.screenRegion = plan.region;
+      if (client !== null) return await client.findText(plan.text, options);
+      const selector =
+        plan.displayId !== undefined
+          ? displaySelector(plan.displayId)
+          : undefined;
+      return await context.runner.displays.findText(
+        selector,
+        plan.text,
+        options,
+      );
+    };
+    let response = await findOnce();
+    const matchCount = () =>
+      Array.isArray(response?.matches) ? response.matches.length : 0;
+    let timedOut = false;
+    if (plan.wait && matchCount() === 0) {
+      const deadline = Date.now() + (plan.timeoutMs ?? 10_000);
+      while (
+        !call.signal.aborted &&
+        matchCount() === 0 &&
+        Date.now() < deadline
+      ) {
+        await sleep(
+          Math.min(250, Math.max(1, deadline - Date.now())),
+          call.signal,
+        );
+        if (call.signal.aborted) break;
+        response = await findOnce();
       }
-      timedOut = response.matches.length === 0
+      timedOut = matchCount() === 0;
     }
     // findText responses carry the capture they matched against, so each match
     // can report its screen point, image pixel and (when windowed) window point.
-    const windowFrame = windowed ? (response.window?.frame ?? client?.window?.frame ?? null) : null
-    const result = { matches: enrichTextMatches(mapTextMatches(response.matches), response.capture ?? null, windowFrame) }
-    if (response.capture !== undefined && response.capture !== null) result.capture = mapCapturedFrame(response.capture)
-    if (response.display !== undefined && response.display !== null) result.display = mapDisplay(response.display)
+    const windowFrame = windowed
+      ? (response?.window?.frame ?? client?.window?.frame ?? null)
+      : null;
+    const result = {
+      matches: enrichTextMatches(
+        mapTextMatches(response?.matches),
+        response?.capture ?? null,
+        windowFrame,
+      ),
+    };
+    if (response.capture !== undefined && response.capture !== null)
+      result.capture = mapCapturedFrame(response.capture);
+    if (response.display !== undefined && response.display !== null)
+      result.display = mapDisplay(response.display);
     if (response.window !== undefined && response.window !== null) {
-      result.window = mapWindowRow(response.window, response.window.ref?.windowId)
+      result.window = mapWindowRow(
+        response.window,
+        response.window.ref?.windowId,
+      );
     }
     return completedValue(context, commandId, {
+      mode: "find",
       result,
       warnings: [],
       timed_out: timedOut,
       coordinate_note: COORDINATE_NOTE,
-    })
+    });
   } catch (error) {
-    throw fail(context, error, 'ocr', call)
+    throw fail(context, error, "ocr", call);
   }
 }
 
 /** Pull a `ScreenPoint`-shaped value out of an SDK response or computed object. */
 function pointOrNull(value) {
-  return normalizePoint(value)
+  return normalizePoint(value);
 }
 
 async function displayFrameById(context, displayId, signal) {
-  const displays = await context.runner.displays.list({ signal })
-  const match = Array.isArray(displays) ? displays.find((display) => display?.displayId === displayId) : undefined
-  return match?.frame ?? null
+  const displays = await context.runner.displays.list({ signal });
+  const match = Array.isArray(displays)
+    ? displays.find((display) => display?.displayId === displayId)
+    : undefined;
+  return match?.frame ?? null;
 }
 
 async function click(context, plan, exec, timeoutMs) {
-  const call = beginCall(exec?.signal, timeoutMs)
-  const warnings = []
+  const call = beginCall(exec?.signal, timeoutMs);
+  const warnings = [];
   try {
-    if (plan.kind === 'text') {
-      const windowed = plan.windowId !== undefined || plan.applicationId !== undefined
-      const commandId = windowed ? 'window.clickText' : 'display.clickText'
-      const target = formatTargetString(plan)
+    if (plan.kind === "text") {
+      const windowed =
+        plan.windowId !== undefined || plan.applicationId !== undefined;
+      const commandId = windowed ? "window.clickText" : "display.clickText";
+      const target = formatTargetString(plan);
+      const clickOptions = buildClickOptions({
+        count: plan.count,
+        modifiers: plan.modifiers,
+        windowStrategy: plan.windowStrategy,
+      });
       if (windowed) {
-        const client = await resolveWindowClient(context, plan, call.signal)
-        const found = await client.findText(plan.text, { signal: call.signal })
-        const windowFrame = found.window?.frame ?? client.window?.frame ?? null
-        const matches = enrichTextMatches(mapTextMatches(found.matches), found.capture ?? null, windowFrame)
+        const client = await resolveWindowClient(context, plan, call.signal);
+        const found = await client.findText(plan.text, { signal: call.signal });
+        const windowFrame = found.window?.frame ?? client.window?.frame ?? null;
+        const matches = enrichTextMatches(
+          mapTextMatches(found.matches),
+          found.capture ?? null,
+          windowFrame,
+        );
         if (matches.length === 0) {
-          warnings.push(`No visible text matched "${plan.text}"; nothing was clicked.`)
+          warnings.push(
+            `No visible text matched "${plan.text}"; nothing was clicked.`,
+          );
           return completedValue(context, commandId, {
             target,
             result: { matches, click: null },
@@ -1021,37 +1252,59 @@ async function click(context, plan, exec, timeoutMs) {
             window_point: null,
             coordinate_note: COORDINATE_NOTE,
             warnings,
-          })
+          });
         }
-        const response = await client.click({ bounds: found.matches[0].bounds }, undefined, { signal: call.signal })
-        const clickResult = normalizeMessage(response)
-        const screenPoint = pointOrNull(clickResult.screen_point) ?? rectCenter(found.matches[0].bounds)
+        const response = await client.click(
+          { bounds: found.matches[0].bounds },
+          clickOptions,
+          { signal: call.signal },
+        );
+        const clickResult = normalizeMessage(response);
+        const screenPoint =
+          pointOrNull(clickResult.screen_point) ??
+          rectCenter(found.matches[0].bounds);
         const windowPoint =
           windowFrame === null
             ? null
-            : (pointOrNull(clickResult.window_point) ?? (screenPoint === null ? null : windowPointFromScreenPoint(screenPoint, windowFrame)))
+            : (pointOrNull(clickResult.window_point) ??
+              (screenPoint === null
+                ? null
+                : windowPointFromScreenPoint(screenPoint, windowFrame)));
         return completedValue(context, commandId, {
           target,
+          count: plan.count ?? 1,
+          modifiers: plan.modifiers ?? null,
+          window_strategy: plan.windowStrategy ?? null,
           result: { matches, click: clickResult },
           screen_point: screenPoint,
           window_point: windowPoint,
           coordinate_note: COORDINATE_NOTE,
           warnings,
-        })
+        });
       }
-      const findOptions = { signal: call.signal }
+      const findOptions = { signal: call.signal };
       if (plan.within !== undefined) {
         findOptions.screenRegion = {
           x: plan.within.left,
           y: plan.within.top,
           width: plan.within.right - plan.within.left,
           height: plan.within.bottom - plan.within.top,
-        }
+        };
       }
-      const found = await context.runner.displays.findText(undefined, plan.text, findOptions)
-      const matches = enrichTextMatches(mapTextMatches(found.matches), found.capture ?? null, null)
+      const found = await context.runner.displays.findText(
+        undefined,
+        plan.text,
+        findOptions,
+      );
+      const matches = enrichTextMatches(
+        mapTextMatches(found.matches),
+        found.capture ?? null,
+        null,
+      );
       if (matches.length === 0) {
-        warnings.push(`No visible text matched "${plan.text}"; nothing was clicked.`)
+        warnings.push(
+          `No visible text matched "${plan.text}"; nothing was clicked.`,
+        );
         return completedValue(context, commandId, {
           target,
           result: { matches, click: null },
@@ -1059,106 +1312,184 @@ async function click(context, plan, exec, timeoutMs) {
           window_point: null,
           coordinate_note: COORDINATE_NOTE,
           warnings,
-        })
+        });
       }
-      const response = await context.runner.input.click({ bounds: found.matches[0].bounds }, undefined, { signal: call.signal })
-      const clickResult = normalizeMessage(response)
+      const response = await context.runner.input.click(
+        { bounds: found.matches[0].bounds },
+        clickOptions,
+        { signal: call.signal },
+      );
+      const clickResult = normalizeMessage(response);
       return completedValue(context, commandId, {
         target,
+        count: plan.count ?? 1,
+        modifiers: plan.modifiers ?? null,
         result: { matches, click: clickResult },
-        screen_point: pointOrNull(clickResult.screen_point) ?? rectCenter(found.matches[0].bounds),
+        screen_point:
+          pointOrNull(clickResult.screen_point) ??
+          rectCenter(found.matches[0].bounds),
         window_point: null,
         coordinate_note: COORDINATE_NOTE,
         warnings,
-      })
+      });
     }
 
-    const commandId = 'input.clickPoint'
-    const target = formatTargetString(plan)
-    const space = plan.space ?? 'screen'
+    const commandId = "input.clickPoint";
+    const target = formatTargetString(plan);
+    const space = plan.space ?? "screen";
     const clickOptions = buildClickOptions({
       button: plan.button,
-      mouseButton: plan.button === undefined ? undefined : MOUSE_BUTTONS[plan.button],
-    })
-    let response
-    let clickResult
-    let screenPoint = null
-    let windowPoint = null
-    let displayPoint = null
-    if (space === 'window') {
-      const client = await resolveWindowClient(context, plan, call.signal)
-      response = await client.click({ x: plan.x, y: plan.y }, clickOptions, { signal: call.signal })
-      clickResult = normalizeMessage(response)
-      windowPoint = pointOrNull(clickResult.window_point) ?? { x: plan.x, y: plan.y }
-      const frame = clickResult.window?.frame ?? client.window?.frame ?? null
-      screenPoint =
-        pointOrNull(clickResult.screen_point) ?? (frame === null ? null : screenPointFromWindowPoint(windowPoint, frame))
-    } else if (space === 'display') {
-      const frame = await displayFrameById(context, plan.displayId, call.signal)
-      response = await context.runner.input.click(Position.display(plan.displayId, plan.x, plan.y), clickOptions, {
+      mouseButton:
+        plan.button === undefined ? undefined : MOUSE_BUTTONS[plan.button],
+      count: plan.count,
+      modifiers: plan.modifiers,
+      windowStrategy: plan.windowStrategy,
+    });
+    let response;
+    let clickResult;
+    let screenPoint = null;
+    let windowPoint = null;
+    let displayPoint = null;
+    if (space === "window") {
+      const client = await resolveWindowClient(context, plan, call.signal);
+      response = await client.click({ x: plan.x, y: plan.y }, clickOptions, {
         signal: call.signal,
-      })
-      clickResult = normalizeMessage(response)
-      displayPoint = { x: plan.x, y: plan.y }
+      });
+      clickResult = normalizeMessage(response);
+      windowPoint = pointOrNull(clickResult.window_point) ?? {
+        x: plan.x,
+        y: plan.y,
+      };
+      const frame = clickResult.window?.frame ?? client.window?.frame ?? null;
       screenPoint =
-        pointOrNull(clickResult.screen_point) ?? (frame === null ? null : screenPointFromDisplayPoint(displayPoint, frame))
+        pointOrNull(clickResult.screen_point) ??
+        (frame === null
+          ? null
+          : screenPointFromWindowPoint(windowPoint, frame));
+    } else if (space === "display") {
+      const frame = await displayFrameById(
+        context,
+        plan.displayId,
+        call.signal,
+      );
+      response = await context.runner.input.click(
+        Position.display(plan.displayId, plan.x, plan.y),
+        clickOptions,
+        {
+          signal: call.signal,
+        },
+      );
+      clickResult = normalizeMessage(response);
+      displayPoint = { x: plan.x, y: plan.y };
+      screenPoint =
+        pointOrNull(clickResult.screen_point) ??
+        (frame === null
+          ? null
+          : screenPointFromDisplayPoint(displayPoint, frame));
     } else {
       // Logical screen point delivered as a foreground global click. This is
       // the Unity/Canvas-safe form: no window-targeted delivery is involved.
-      response = await context.runner.input.click(Position.screen(plan.x, plan.y), clickOptions, { signal: call.signal })
-      clickResult = normalizeMessage(response)
-      screenPoint = pointOrNull(clickResult.screen_point) ?? { x: plan.x, y: plan.y }
+      response = await context.runner.input.click(
+        Position.screen(plan.x, plan.y),
+        clickOptions,
+        { signal: call.signal },
+      );
+      clickResult = normalizeMessage(response);
+      screenPoint = pointOrNull(clickResult.screen_point) ?? {
+        x: plan.x,
+        y: plan.y,
+      };
       if (plan.windowId !== undefined || plan.applicationId !== undefined) {
-        const client = await resolveWindowClient(context, plan, call.signal)
-        const frame = client.window?.frame ?? null
-        if (frame !== null) windowPoint = windowPointFromScreenPoint(screenPoint, frame)
+        const client = await resolveWindowClient(context, plan, call.signal);
+        const frame = client.window?.frame ?? null;
+        if (frame !== null)
+          windowPoint = windowPointFromScreenPoint(screenPoint, frame);
       } else if (plan.displayId !== undefined) {
-        const frame = await displayFrameById(context, plan.displayId, call.signal)
-        if (frame !== null) displayPoint = displayPointFromScreenPoint(screenPoint, frame)
+        const frame = await displayFrameById(
+          context,
+          plan.displayId,
+          call.signal,
+        );
+        if (frame !== null)
+          displayPoint = displayPointFromScreenPoint(screenPoint, frame);
       }
     }
     return completedValue(context, commandId, {
       target,
       space,
+      count: plan.count ?? 1,
+      modifiers: plan.modifiers ?? null,
+      window_strategy: plan.windowStrategy ?? null,
       result: clickResult,
       screen_point: screenPoint,
       window_point: windowPoint,
       display_point: displayPoint,
       coordinate_note: COORDINATE_NOTE,
       warnings,
-    })
-
+    });
   } catch (error) {
-    throw fail(context, error, 'click', call)
+    throw fail(context, error, "click", call);
   }
 }
 
 function foregroundRecipient() {
-  return { recipient: { case: 'foreground', value: true } }
+  return { recipient: { case: "foreground", value: true } };
 }
 
 function applicationRecipient(applicationId) {
-  return { recipient: { case: 'applicationId', value: applicationId } }
+  return { recipient: { case: "applicationId", value: applicationId } };
 }
 
 async function type(context, plan, exec, timeoutMs) {
-  const call = beginCall(exec?.signal, timeoutMs)
-  const commandId = plan.mode === 'paste' ? 'input.pasteText' : 'input.typeText'
-  const policy = inputPolicyValue(plan.policy)
+  const call = beginCall(exec?.signal, timeoutMs);
+  const commandId =
+    plan.mode === "paste" ? "input.pasteText" : "input.typeText";
+  const policy = inputPolicyValue(plan.policy);
+  // `submit` (RETURN/SEARCH/DONE/GO) and `replace_existing` are TextSubmit /
+  // TypeTextOptions fields; the same options exist for paste.
+  const textOptions = buildTextOptions({
+    policy,
+    replaceExisting: plan.replaceExisting,
+    submit: plan.submit,
+  });
+  const submitOnly = buildTextOptions({
+    replaceExisting: plan.replaceExisting,
+    submit: plan.submit,
+  });
   try {
-    const client = await resolveWindowClient(context, plan, call.signal)
-    let response
+    const client = await resolveWindowClient(context, plan, call.signal);
+    let response;
     if (client !== null) {
       response =
-        plan.mode === 'paste'
-          ? await client.pasteText(plan.text, policy === undefined ? {} : { policy }, { signal: call.signal })
-          : await client.typeText(plan.text, policy === undefined ? {} : { policy }, { signal: call.signal })
+        plan.mode === "paste"
+          ? await client.pasteText(plan.text, textOptions ?? {}, {
+              signal: call.signal,
+            })
+          : await client.typeText(plan.text, textOptions ?? {}, {
+              signal: call.signal,
+            });
     } else if (plan.applicationId !== undefined) {
       // App-level recipient: one KeyboardInput on the application.
       const action =
-        plan.mode === 'paste'
-          ? { case: 'pasteText', value: { text: plan.text, policy: policy ?? InputPolicy.FOREGROUND_PREFERRED } }
-          : { case: 'typeText', value: { text: plan.text, options: { policy: policy ?? InputPolicy.FOREGROUND_PREFERRED } } }
+        plan.mode === "paste"
+          ? {
+              case: "pasteText",
+              value: {
+                text: plan.text,
+                policy: policy ?? InputPolicy.FOREGROUND_PREFERRED,
+                ...(submitOnly ?? {}),
+              },
+            }
+          : {
+              case: "typeText",
+              value: {
+                text: plan.text,
+                options: {
+                  policy: policy ?? InputPolicy.FOREGROUND_PREFERRED,
+                  ...(submitOnly ?? {}),
+                },
+              },
+            };
       response = await context.runner.input.keyboard(
         {
           target: applicationRecipient(plan.applicationId),
@@ -1166,64 +1497,134 @@ async function type(context, plan, exec, timeoutMs) {
           dryRun: false,
         },
         { signal: call.signal },
-      )
-    } else if (plan.mode === 'paste' && policy === undefined) {
-      response = await context.runner.input.pasteText(plan.text, {}, { signal: call.signal })
-    } else if (plan.mode === 'paste') {
+      );
+    } else if (plan.mode === "paste" && policy === undefined) {
+      response = await context.runner.input.pasteText(
+        plan.text,
+        submitOnly ?? {},
+        { signal: call.signal },
+      );
+    } else if (plan.mode === "paste") {
       response = await context.runner.input.keyboard(
         {
           target: foregroundRecipient(),
-          inputs: [{ action: { case: 'pasteText', value: { text: plan.text, policy } } }],
+          inputs: [
+            {
+              action: {
+                case: "pasteText",
+                value: { text: plan.text, policy, ...(submitOnly ?? {}) },
+              },
+            },
+          ],
           dryRun: false,
         },
         { signal: call.signal },
-      )
+      );
     } else {
-      response = await context.runner.input.typeText(plan.text, policy === undefined ? {} : { policy }, { signal: call.signal })
+      response = await context.runner.input.typeText(
+        plan.text,
+        textOptions ?? {},
+        { signal: call.signal },
+      );
     }
-    return completedValue(context, commandId, { target: formatTargetString(plan), result: normalizeMessage(response), warnings: [] })
+    return completedValue(context, commandId, {
+      target: formatTargetString(plan),
+      mode: plan.mode,
+      submit: plan.submit ?? null,
+      replace_existing: plan.replaceExisting === true,
+      result: normalizeMessage(response),
+      warnings: [],
+    });
   } catch (error) {
-    throw fail(context, error, 'type', call)
+    throw fail(context, error, "type", call);
   }
 }
 
 const KEYS_DELIVERY_WARNING =
-  'AUV confirms key delivery only; it does not prove the app reacted. Pair auv_keys with auv_wait_for_change (or a fresh auv_screenshot) to verify the effect.'
+  "AUV confirms key delivery only; it does not prove the app reacted. Pair auv_keys with auv_wait_for_change (or a fresh auv_screenshot) to verify the effect.";
 
 async function keys(context, plan, exec, timeoutMs) {
-  const call = beginCall(exec?.signal, timeoutMs)
+  const call = beginCall(exec?.signal, timeoutMs);
   try {
-    const delivery = planKeysDelivery(plan)
-    const client = await resolveWindowClient(context, plan, call.signal)
-    const warnings = []
+    const delivery = planKeysDelivery(plan);
+    const client = await resolveWindowClient(context, plan, call.signal);
+    const warnings = [];
 
     // Inactive targets can swallow the first key event, so focus before sending
     // when a target was given (default) and `focus` was not turned off.
-    let focusEvidence = null
+    let focusEvidence = null;
     if (delivery.focus && client !== null) {
       if (plan.windowId !== undefined) {
-        const mutation = await client.setFocus({ signal: call.signal })
-        focusEvidence = { via: 'window.setFocus', result: normalizeMessage(mutation) }
+        const mutation = await client.setFocus({ signal: call.signal });
+        focusEvidence = {
+          via: "window.setFocus",
+          result: normalizeMessage(mutation),
+        };
       } else {
-        const activation = await context.runner.applications.activate({ applicationId: plan.applicationId }, { signal: call.signal })
-        focusEvidence = { via: 'application.activate', result: mapActivateResult(activation) }
-        const warning = activationWarning(activation)
-        if (warning !== null) warnings.push(warning)
+        const activation = await context.runner.applications.activate(
+          { applicationId: plan.applicationId },
+          { signal: call.signal },
+        );
+        focusEvidence = {
+          via: "application.activate",
+          result: mapActivateResult(activation),
+        };
+        const warning = activationWarning(activation);
+        if (warning !== null) warnings.push(warning);
       }
     }
 
-    const policyValue = inputPolicyValue(delivery.effectivePolicy) ?? InputPolicy.FOREGROUND_PREFERRED
-    let response
-    if (client !== null && delivery.deliveryVia === 'window') {
+    const policyValue =
+      inputPolicyValue(delivery.effectivePolicy) ??
+      InputPolicy.FOREGROUND_PREFERRED;
+    let response;
+    if (plan.holdMs !== undefined) {
+      // One press-and-release hold; AUV rejects a zero/absent duration.
+      const target =
+        delivery.deliveryVia === "window" && plan.windowId !== undefined
+          ? {
+              recipient: {
+                case: "window",
+                value: { ref: { windowId: plan.windowId } },
+              },
+            }
+          : delivery.deliveryVia === "window" &&
+              plan.applicationId !== undefined
+            ? applicationRecipient(plan.applicationId)
+            : foregroundRecipient();
+      response = await context.runner.input.holdKeys(
+        { target, keys: plan.keys, policy: policyValue, duration: plan.holdMs },
+        { signal: call.signal },
+      );
+      warnings.push(KEYS_DELIVERY_WARNING);
+      return completedValue(context, "input.holdKeys", {
+        target: formatTargetString(plan),
+        policy: delivery.effectivePolicy,
+        focus: delivery.focus,
+        focus_target: delivery.focusTarget,
+        focus_evidence: focusEvidence,
+        delivery_via: delivery.deliveryVia,
+        hold_ms: plan.holdMs,
+        result: normalizeMessage(response),
+        warnings,
+      });
+    }
+    if (client !== null && delivery.deliveryVia === "window") {
       response = await client.pressKeys(
         plan.keys,
         {
-          count: plan.repeat !== undefined && plan.repeat > 1 ? plan.repeat : undefined,
-          interval: plan.repeat !== undefined && plan.repeat > 1 ? (plan.intervalMs ?? 50) : undefined,
+          count:
+            plan.repeat !== undefined && plan.repeat > 1
+              ? plan.repeat
+              : undefined,
+          interval:
+            plan.repeat !== undefined && plan.repeat > 1
+              ? (plan.intervalMs ?? 50)
+              : undefined,
           policy: policyValue,
         },
         { signal: call.signal },
-      )
+      );
     } else {
       const request = buildPressKeysRequest({
         keys: plan.keys,
@@ -1232,11 +1633,13 @@ async function keys(context, plan, exec, timeoutMs) {
         applicationId: undefined,
         policy: policyValue,
         dryRun: false,
-      })
-      response = await context.runner.input.pressKeys(request, { signal: call.signal })
+      });
+      response = await context.runner.input.pressKeys(request, {
+        signal: call.signal,
+      });
     }
-    warnings.push(KEYS_DELIVERY_WARNING)
-    return completedValue(context, 'input.pressKeys', {
+    warnings.push(KEYS_DELIVERY_WARNING);
+    return completedValue(context, "input.pressKeys", {
       target: formatTargetString(plan),
       policy: delivery.effectivePolicy,
       focus: delivery.focus,
@@ -1245,74 +1648,156 @@ async function keys(context, plan, exec, timeoutMs) {
       delivery_via: delivery.deliveryVia,
       result: normalizeMessage(response),
       warnings,
-    })
+    });
   } catch (error) {
-    throw fail(context, error, 'keys', call)
+    throw fail(context, error, "keys", call);
   }
 }
 
 async function scroll(context, plan, exec, timeoutMs) {
-  const call = beginCall(exec?.signal, timeoutMs)
+  const call = beginCall(exec?.signal, timeoutMs);
   try {
     if (plan.windowId !== undefined) {
-      const client = await context.runner.windows.get(plan.windowId, { signal: call.signal })
-      let pointX = plan.x
-      let pointY = plan.y
-      const frame = client.window?.frame
+      const client = await context.runner.windows.get(plan.windowId, {
+        signal: call.signal,
+      });
+      let pointX = plan.x;
+      let pointY = plan.y;
+      const frame = client.window?.frame;
       if (pointX === undefined || pointY === undefined) {
-        const width = Number(frame?.width)
-        const height = Number(frame?.height)
-        if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
-          throw new AuvError(`AUV could not read the frame of window "${plan.windowId}"; pass window-local x and y explicitly.`, {
-            code: 'AUV_BAD_WINDOW_FRAME',
-          })
+        const width = Number(frame?.width);
+        const height = Number(frame?.height);
+        if (
+          !Number.isFinite(width) ||
+          !Number.isFinite(height) ||
+          width <= 0 ||
+          height <= 0
+        ) {
+          throw new AuvError(
+            `AUV could not read the frame of window "${plan.windowId}"; pass window-local x and y explicitly.`,
+            {
+              code: "AUV_BAD_WINDOW_FRAME",
+            },
+          );
         }
-        if (pointX === undefined) pointX = Math.round(width / 2)
-        if (pointY === undefined) pointY = Math.round(height / 2)
+        if (pointX === undefined) pointX = Math.round(width / 2);
+        if (pointY === undefined) pointY = Math.round(height / 2);
+      }
+      const point = { x: pointX, y: pointY };
+      if (plan.untilText !== undefined) {
+        // scrollUntil scrolls in steps and observes the viewport on the Runner;
+        // it stops when the query text is visible, motion ends, or maxSteps runs out.
+        const request = buildScrollUntilRequest({
+          dx: plan.dx ?? 0,
+          dy: plan.dy,
+          untilText: plan.untilText,
+          smooth: plan.smooth,
+        });
+        const response = await client.scrollUntil(point, request, {
+          signal: call.signal,
+        });
+        const scrollResult = normalizeMessage(response);
+        const reason = scrollUntilReasonName(response?.reason);
+        scrollResult.reason_name = reason;
+        return completedValue(context, "window.scrollUntil", {
+          result: scrollResult,
+          until_text: plan.untilText,
+          smooth: plan.smooth,
+          reason,
+          steps: Number.isFinite(Number(scrollResult.steps))
+            ? Number(scrollResult.steps)
+            : null,
+          text_match: scrollResult.text_match ?? null,
+          window_point: point,
+          screen_point:
+            frame === null || frame === undefined
+              ? null
+              : screenPointFromWindowPoint(point, frame),
+          coordinate_note: COORDINATE_NOTE,
+          warnings: [],
+        });
+      }
+      if (plan.smooth) {
+        // scrollMotion streams samples; the last event is the completion.
+        const stream = await client.scrollMotion(
+          point,
+          buildScrollMotion({ dx: plan.dx ?? 0, dy: plan.dy }),
+          undefined,
+          {
+            signal: call.signal,
+          },
+        );
+        let last = null;
+        for await (const event of stream) last = event;
+        const scrollResult = last === null ? null : normalizeMessage(last);
+        return completedValue(context, "window.scrollMotion", {
+          result: scrollResult,
+          smooth: true,
+          delivered: scrollResult?.event?.value?.delivered ?? null,
+          window_point: point,
+          screen_point:
+            frame === null || frame === undefined
+              ? null
+              : screenPointFromWindowPoint(point, frame),
+          coordinate_note: COORDINATE_NOTE,
+          warnings: [],
+        });
       }
       const response = await client.scroll(
-        { x: pointX, y: pointY },
+        point,
         { deltaX: plan.dx ?? 0, deltaY: plan.dy },
         undefined,
         { signal: call.signal },
-      )
-      const scrollResult = normalizeMessage(response)
-      const windowPoint = pointOrNull(scrollResult.point) ?? { x: pointX, y: pointY }
-      const refreshedFrame = scrollResult.window?.frame ?? frame ?? null
-      const screenPoint = refreshedFrame === null || refreshedFrame === undefined ? null : screenPointFromWindowPoint(windowPoint, refreshedFrame)
-      return completedValue(context, 'window.scroll', {
+      );
+      const scrollResult = normalizeMessage(response);
+      const windowPoint = pointOrNull(scrollResult.point) ?? {
+        x: pointX,
+        y: pointY,
+      };
+      const refreshedFrame = scrollResult.window?.frame ?? frame ?? null;
+      const screenPoint =
+        refreshedFrame === null || refreshedFrame === undefined
+          ? null
+          : screenPointFromWindowPoint(windowPoint, refreshedFrame);
+      return completedValue(context, "window.scroll", {
         result: scrollResult,
         window_point: windowPoint,
         screen_point: screenPoint,
         coordinate_note: COORDINATE_NOTE,
         warnings: [],
-      })
+      });
     }
 
-    if (process.platform === 'darwin') {
+    if (process.platform === "darwin") {
       throw new Error(
-        'macOS cannot scroll at a screen point: AUV\'s input.scrollPoint is available only on Linux and Windows. Pass window_id (and optionally window-local x and y) so the scroll goes through window.scroll.',
-      )
+        "macOS cannot scroll at a screen point: AUV's input.scrollPoint is available only on Linux and Windows. Pass window_id (and optionally window-local x and y) so the scroll goes through window.scroll.",
+      );
     }
     const response = await invokeUnary(context.connection, {
-      service: 'auv.api.driver.v1.InputService',
-      method: 'ScrollPoint',
+      service: "auv.api.driver.v1.InputService",
+      method: "ScrollPoint",
       input: InputService.method.scrollPoint.input,
       output: InputService.method.scrollPoint.output,
-      request: { position: Position.screen(plan.x, plan.y), scroll: { deltaX: plan.dx ?? 0, deltaY: plan.dy } },
+      request: {
+        position: Position.screen(plan.x, plan.y),
+        scroll: { deltaX: plan.dx ?? 0, deltaY: plan.dy },
+      },
       runnerClass: RUNNER_CLASS,
       signal: call.signal,
-    })
-    const scrollResult = normalizeMessage(response)
-    return completedValue(context, 'input.scrollPoint', {
+    });
+    const scrollResult = normalizeMessage(response);
+    return completedValue(context, "input.scrollPoint", {
       result: scrollResult,
-      screen_point: pointOrNull(scrollResult.screen_point) ?? { x: plan.x, y: plan.y },
+      screen_point: pointOrNull(scrollResult.screen_point) ?? {
+        x: plan.x,
+        y: plan.y,
+      },
       window_point: null,
       coordinate_note: COORDINATE_NOTE,
       warnings: [],
-    })
+    });
   } catch (error) {
-    throw fail(context, error, 'scroll', call)
+    throw fail(context, error, "scroll", call);
   }
 }
 
@@ -1324,71 +1809,97 @@ async function scroll(context, plan, exec, timeoutMs) {
  * in the foreground.
  */
 async function drag(context, plan, exec, timeoutMs) {
-  const call = beginCall(exec?.signal, timeoutMs)
-  const warnings = []
+  const call = beginCall(exec?.signal, timeoutMs);
+  const warnings = [];
   try {
-    let client = null
-    let windowFrame = null
-    let displayFrame = null
+    let client = null;
+    let windowFrame = null;
+    let displayFrame = null;
     if (plan.windowId !== undefined || plan.applicationId !== undefined) {
-      client = await resolveWindowClient(context, plan, call.signal)
-      windowFrame = client.window?.frame ?? null
+      client = await resolveWindowClient(context, plan, call.signal);
+      windowFrame = client.window?.frame ?? null;
       if (plan.activate) {
         if (plan.windowId !== undefined) {
-          await client.setFocus({ signal: call.signal })
+          await client.setFocus({ signal: call.signal });
         } else {
-          const activation = await context.runner.applications.activate({ applicationId: plan.applicationId }, { signal: call.signal })
-          const warning = activationWarning(activation)
-          if (warning !== null) warnings.push(warning)
+          const activation = await context.runner.applications.activate(
+            { applicationId: plan.applicationId },
+            { signal: call.signal },
+          );
+          const warning = activationWarning(activation);
+          if (warning !== null) warnings.push(warning);
         }
         // Focus/activation can raise or restore a window; convert points with
         // the frame that is current after it.
-        const refreshed = await client.refresh({ signal: call.signal })
-        windowFrame = refreshed?.frame ?? windowFrame
+        const refreshed = await client.refresh({ signal: call.signal });
+        windowFrame = refreshed?.frame ?? windowFrame;
       }
-    } else if (plan.space === 'display') {
-      displayFrame = await displayFrameById(context, plan.displayId, call.signal)
+    } else if (plan.space === "display") {
+      displayFrame = await displayFrameById(
+        context,
+        plan.displayId,
+        call.signal,
+      );
       if (displayFrame === null) {
         throw new AuvError(
           `Display "${plan.displayId}" was not found. Call auv_screenshot or auv_windows to refresh display ids.`,
-          { code: 'AUV_DISPLAY_NOT_FOUND' },
-        )
+          { code: "AUV_DISPLAY_NOT_FOUND" },
+        );
       }
     }
 
-    let screenStart
-    let screenEnd
-    let displayPointStart = null
-    let displayPointEnd = null
-    if (plan.space === 'window') {
+    let screenStart;
+    let screenEnd;
+    let displayPointStart = null;
+    let displayPointEnd = null;
+    if (plan.space === "window") {
       if (windowFrame === null) {
-        throw new AuvError('AUV could not read the target window frame, so window points cannot be converted to screen points.', {
-          code: 'AUV_BAD_WINDOW_FRAME',
-        })
+        throw new AuvError(
+          "AUV could not read the target window frame, so window points cannot be converted to screen points.",
+          {
+            code: "AUV_BAD_WINDOW_FRAME",
+          },
+        );
       }
-      screenStart = screenPointFromWindowPoint(plan.from, windowFrame)
-      screenEnd = screenPointFromWindowPoint(plan.to, windowFrame)
-    } else if (plan.space === 'display') {
-      displayPointStart = plan.from
-      displayPointEnd = plan.to
-      screenStart = screenPointFromDisplayPoint(plan.from, displayFrame)
-      screenEnd = screenPointFromDisplayPoint(plan.to, displayFrame)
+      screenStart = screenPointFromWindowPoint(plan.from, windowFrame);
+      screenEnd = screenPointFromWindowPoint(plan.to, windowFrame);
+    } else if (plan.space === "display") {
+      displayPointStart = plan.from;
+      displayPointEnd = plan.to;
+      screenStart = screenPointFromDisplayPoint(plan.from, displayFrame);
+      screenEnd = screenPointFromDisplayPoint(plan.to, displayFrame);
     } else {
-      screenStart = plan.from
-      screenEnd = plan.to
+      screenStart = plan.from;
+      screenEnd = plan.to;
     }
 
-    const movement = buildDragMovement({ startScreen: screenStart, endScreen: screenEnd, durationMs: plan.durationMs })
+    const movement = buildDragMovement({
+      startScreen: screenStart,
+      endScreen: screenEnd,
+      durationMs: plan.durationMs,
+    });
     const response = await context.runner.input.dragMouse(
       { movement, button: MOUSE_BUTTONS[plan.button] },
       { signal: call.signal },
-    )
-    const dragResult = normalizeMessage(response)
-    const windowStart = windowFrame === null ? null : windowPointFromScreenPoint(screenStart, windowFrame)
-    const windowEnd = windowFrame === null ? null : windowPointFromScreenPoint(screenEnd, windowFrame)
-    const displayStart = displayFrame === null ? null : displayPointFromScreenPoint(screenStart, displayFrame)
-    const displayEnd = displayFrame === null ? null : displayPointFromScreenPoint(screenEnd, displayFrame)
-    return completedValue(context, 'input.dragMouse', {
+    );
+    const dragResult = normalizeMessage(response);
+    const windowStart =
+      windowFrame === null
+        ? null
+        : windowPointFromScreenPoint(screenStart, windowFrame);
+    const windowEnd =
+      windowFrame === null
+        ? null
+        : windowPointFromScreenPoint(screenEnd, windowFrame);
+    const displayStart =
+      displayFrame === null
+        ? null
+        : displayPointFromScreenPoint(screenStart, displayFrame);
+    const displayEnd =
+      displayFrame === null
+        ? null
+        : displayPointFromScreenPoint(screenEnd, displayFrame);
+    return completedValue(context, "input.dragMouse", {
       button: plan.button,
       duration_ms: plan.durationMs,
       space: plan.space,
@@ -1406,9 +1917,9 @@ async function drag(context, plan, exec, timeoutMs) {
       result: dragResult,
       coordinate_note: COORDINATE_NOTE,
       warnings,
-    })
+    });
   } catch (error) {
-    throw fail(context, error, 'drag', call)
+    throw fail(context, error, "drag", call);
   }
 }
 
@@ -1422,18 +1933,21 @@ async function drag(context, plan, exec, timeoutMs) {
  * (20) with a 5-minute TTL, never written to disk.
  */
 async function captureState(context, plan, exec, timeoutMs) {
-  const call = beginCall(exec?.signal, timeoutMs)
+  const call = beginCall(exec?.signal, timeoutMs);
   try {
-    const source = await resolveCaptureSource(context, plan, call.signal)
-    const frame = await source.capture()
+    const source = await resolveCaptureSource(context, plan, call.signal);
+    const frame = await source.capture();
     const image = await context.runner.captures.image(frame, {
       encoding: ImageEncoding.RGBA,
-      maxSize: { width: CAPTURE_STATE_MAX_SIZE, height: CAPTURE_STATE_MAX_SIZE },
+      maxSize: {
+        width: CAPTURE_STATE_MAX_SIZE,
+        height: CAPTURE_STATE_MAX_SIZE,
+      },
       signal: call.signal,
-    })
-    const token = randomUUID()
-    const capturedAt = Date.now()
-    const hash = thumbhashOf(frame)
+    });
+    const token = randomUUID();
+    const capturedAt = Date.now();
+    const hash = thumbhashOf(frame);
     captureStateStore.put(token, {
       width: image.width,
       height: image.height,
@@ -1443,8 +1957,8 @@ async function captureState(context, plan, exec, timeoutMs) {
       targetKey: captureTargetKey(plan),
       target: captureTargetPlan(plan),
       capturedAt,
-    })
-    return completedValue(context, 'frame.captureState', {
+    });
+    return completedValue(context, "frame.captureState", {
       state_token: token,
       hash,
       width: image.width,
@@ -1452,9 +1966,9 @@ async function captureState(context, plan, exec, timeoutMs) {
       mode: source.mode,
       captured_at: new Date(capturedAt).toISOString(),
       warnings: [],
-    })
+    });
   } catch (error) {
-    throw fail(context, error, 'capture_state', call)
+    throw fail(context, error, "capture_state", call);
   }
 }
 
@@ -1472,115 +1986,154 @@ async function captureState(context, plan, exec, timeoutMs) {
  * as changed when that ratio reaches `min_changed_ratio`.
  */
 async function waitForChange(context, plan, exec, timeoutMs) {
-  const call = beginCall(exec?.signal, timeoutMs)
-  const warnings = []
+  const call = beginCall(exec?.signal, timeoutMs);
+  const warnings = [];
   try {
-    let baselineSource
-    let baselineSnapshot = null
-    let baselineHashValue = null
-    let storedTarget = null
+    let baselineSource;
+    let baselineSnapshot = null;
+    let baselineHashValue = null;
+    let storedTarget = null;
     if (plan.stateToken !== undefined) {
-      const stored = requireCaptureState(plan.stateToken)
-      baselineSource = 'state_token'
-      baselineHashValue = stored.hash ?? null
-      storedTarget = stored.target ?? null
+      const stored = requireCaptureState(plan.stateToken);
+      baselineSource = "state_token";
+      baselineHashValue = stored.hash ?? null;
+      storedTarget = stored.target ?? null;
       baselineSnapshot = {
-        pixels: { width: stored.width, height: stored.height, data: stored.data },
+        pixels: {
+          width: stored.width,
+          height: stored.height,
+          data: stored.data,
+        },
         hash: stored.hash ?? null,
-      }
+      };
       const explicitTarget =
         plan.windowId !== undefined ||
         plan.applicationId !== undefined ||
         plan.displayId !== undefined ||
-        plan.region !== undefined
+        plan.region !== undefined;
       if (explicitTarget && captureTargetKey(plan) !== stored.targetKey) {
-        warnings.push(`state_token was captured for ${stored.targetKey}; comparing that target instead of the explicit target.`)
+        warnings.push(
+          `state_token was captured for ${stored.targetKey}; comparing that target instead of the explicit target.`,
+        );
       }
     } else if (plan.baselineHash !== undefined) {
-      baselineSource = 'provided'
-      baselineHashValue = plan.baselineHash
-      warnings.push('Compared ThumbHash only; pass state_token for pixel-ratio comparison.')
+      baselineSource = "provided";
+      baselineHashValue = plan.baselineHash;
+      warnings.push(
+        "Compared ThumbHash only; pass state_token for pixel-ratio comparison.",
+      );
     } else {
-      baselineSource = 'captured'
+      baselineSource = "captured";
     }
 
-    const effectivePlan = baselineSource === 'state_token' && storedTarget !== null ? { ...plan, ...storedTarget } : plan
-    const source = await resolveCaptureSource(context, effectivePlan, call.signal)
-    const mode = source.mode
-    let polled
-    if (baselineSource === 'provided') {
+    const effectivePlan =
+      baselineSource === "state_token" && storedTarget !== null
+        ? { ...plan, ...storedTarget }
+        : plan;
+    const source = await resolveCaptureSource(
+      context,
+      effectivePlan,
+      call.signal,
+    );
+    const mode = source.mode;
+    let polled;
+    if (baselineSource === "provided") {
       const captureHash = async () => {
-        const frame = await source.capture()
-        const thumb = thumbhashOf(frame)
-        if (thumb !== null) return thumb
+        const frame = await source.capture();
+        const thumb = thumbhashOf(frame);
+        if (thumb !== null) return thumb;
         const image = await context.runner.captures.image(frame, {
           encoding: ImageEncoding.RGBA,
-          maxSize: { width: CAPTURE_STATE_MAX_SIZE, height: CAPTURE_STATE_MAX_SIZE },
+          maxSize: {
+            width: CAPTURE_STATE_MAX_SIZE,
+            height: CAPTURE_STATE_MAX_SIZE,
+          },
           signal: call.signal,
-        })
-        return `sha256:${createHash('sha256').update(image.data).digest('hex')}`
-      }
+        });
+        return `sha256:${createHash("sha256").update(image.data).digest("hex")}`;
+      };
       polled = await pollForChange({
         captureSnapshot: captureHash,
         compare: (before, after) => {
-          const changed = before !== after
-          return { changed, ratio: changed ? 1 : 0 }
+          const changed = before !== after;
+          return { changed, ratio: changed ? 1 : 0 };
         },
         intervalMs: plan.intervalMs,
         timeoutMs: plan.timeoutMs,
         signal: call.signal,
-      })
+      });
     } else {
       const capturePixels = async () => {
-        const frame = await source.capture()
-        const hash = thumbhashOf(frame)
+        const frame = await source.capture();
+        const hash = thumbhashOf(frame);
         const image = await context.runner.captures.image(frame, {
           encoding: ImageEncoding.RGBA,
-          maxSize: { width: CAPTURE_STATE_MAX_SIZE, height: CAPTURE_STATE_MAX_SIZE },
+          maxSize: {
+            width: CAPTURE_STATE_MAX_SIZE,
+            height: CAPTURE_STATE_MAX_SIZE,
+          },
           signal: call.signal,
-        })
+        });
         return {
-          pixels: { width: image.width, height: image.height, data: image.data },
-          hash: hash ?? `sha256:${createHash('sha256').update(image.data).digest('hex')}`,
-        }
-      }
+          pixels: {
+            width: image.width,
+            height: image.height,
+            data: image.data,
+          },
+          hash:
+            hash ??
+            `sha256:${createHash("sha256").update(image.data).digest("hex")}`,
+        };
+      };
       polled = await pollForChange({
         captureSnapshot: capturePixels,
         compare: (before, after) => {
-          const difference = compareRgbaFrames(before.pixels, after.pixels, plan.pixelThreshold)
+          const difference = compareRgbaFrames(
+            before.pixels,
+            after.pixels,
+            plan.pixelThreshold,
+          );
           return {
             changed: frameChanged(difference, plan.minChangedRatio),
             ratio: difference.changedRatio,
             dimensionMismatch: difference.dimensionMismatch,
-          }
+          };
         },
         baseline: baselineSnapshot === null ? undefined : baselineSnapshot,
         intervalMs: plan.intervalMs,
         timeoutMs: plan.timeoutMs,
         signal: call.signal,
-      })
+      });
     }
 
     const afterHash =
-      baselineSource === 'provided' ? (typeof polled.after === 'string' ? polled.after : null) : (polled.after?.hash ?? null)
+      baselineSource === "provided"
+        ? typeof polled.after === "string"
+          ? polled.after
+          : null
+        : (polled.after?.hash ?? null);
     const beforeHash =
-      baselineSource === 'provided'
+      baselineSource === "provided"
         ? plan.baselineHash
-        : baselineSource === 'state_token'
+        : baselineSource === "state_token"
           ? baselineHashValue
-          : (polled.before?.hash ?? null)
-    if (polled.result === 'timeout') {
+          : (polled.before?.hash ?? null);
+    if (polled.result === "timeout") {
       warnings.push(
         `No change above min_changed_ratio ${plan.minChangedRatio} within ${plan.timeoutMs} ms (last changed ratio ${polled.changedRatio.toFixed(4)}). The target may be static or the previous input may have had no effect.`,
-      )
+      );
     }
-    if (polled.result === 'no_effect') {
-      warnings.push('Waiting stopped before the timeout without observing a change.')
+    if (polled.result === "no_effect") {
+      warnings.push(
+        "Waiting stopped before the timeout without observing a change.",
+      );
     }
     if (polled.lastComparison?.dimensionMismatch === true) {
-      warnings.push('The capture dimensions changed between frames; treated as changed.')
+      warnings.push(
+        "The capture dimensions changed between frames; treated as changed.",
+      );
     }
-    return completedValue(context, 'frame.waitForChange', {
+    return completedValue(context, "frame.waitForChange", {
       result: polled.result,
       changed: polled.changed,
       changed_ratio: polled.changedRatio,
@@ -1590,49 +2143,135 @@ async function waitForChange(context, plan, exec, timeoutMs) {
       before_hash: beforeHash,
       after_hash: afterHash,
       baseline_source: baselineSource,
-      comparison: baselineSource === 'provided' ? 'hash' : 'pixels',
+      comparison: baselineSource === "provided" ? "hash" : "pixels",
       mode,
       timeout_ms: plan.timeoutMs,
       interval_ms: plan.intervalMs,
       artifact_path: null,
       warnings,
-    })
+    });
   } catch (error) {
-    throw fail(context, error, 'wait_for_change', call)
+    throw fail(context, error, "wait_for_change", call);
   }
 }
 
 async function windows(context, plan, exec, timeoutMs) {
-  const call = beginCall(exec?.signal, timeoutMs)
+  const call = beginCall(exec?.signal, timeoutMs);
   try {
     const clients = await context.runner.windows.list({
       excludeMinimized: !plan.includeMinimized,
       excludeOtherDesktops: !plan.includeOtherDesktops,
       signal: call.signal,
-    })
-    return completedValue(context, 'window.list', {
+    });
+    return completedValue(context, "window.list", {
       windows: clients.map((client) => mapWindowRow(client.window, client.id)),
       warnings: [],
-    })
+    });
   } catch (error) {
-    throw fail(context, error, 'windows', call)
+    throw fail(context, error, "windows", call);
+  }
+}
+
+const WINDOW_COMMAND_IDS = {
+  focus: "window.focus",
+  minimize: "window.minimize",
+  maximize: "window.maximize",
+  restore: "window.setState",
+  set_frame: "window.setFrame",
+  refresh: "window.get",
+};
+
+/**
+ * Window actions: focus, minimize, maximize, restore (state NORMAL), set_frame,
+ * and refresh (a fresh read with no mutation). Mutations report the state the
+ * window ends in and warn when the app settled a different frame.
+ */
+async function windowOp(context, plan, exec, timeoutMs) {
+  const call = beginCall(exec?.signal, timeoutMs);
+  const warnings = [];
+  try {
+    const client = await context.runner.windows.get(plan.windowId, {
+      signal: call.signal,
+    });
+    const before = mapWindowRow(client.window, plan.windowId);
+    if (plan.action === "refresh") {
+      const refreshed = await client.refresh({ signal: call.signal });
+      return completedValue(context, WINDOW_COMMAND_IDS.refresh, {
+        action: plan.action,
+        window_id: plan.windowId,
+        before,
+        window: mapWindowRow(refreshed, plan.windowId),
+        mutation: null,
+        warnings,
+      });
+    }
+    let mutation;
+    if (plan.action === "focus")
+      mutation = await client.setFocus({ signal: call.signal });
+    else if (plan.action === "minimize")
+      mutation = await client.minimize({ signal: call.signal });
+    else if (plan.action === "maximize")
+      mutation = await client.maximize({ signal: call.signal });
+    else if (plan.action === "restore")
+      mutation = await client.setState(WindowStateTarget.NORMAL, {
+        signal: call.signal,
+      });
+    else
+      mutation = await client.setFrame(buildWindowFrame(plan.frame), {
+        signal: call.signal,
+      });
+    if (mutation?.adjustedByApp === true) {
+      warnings.push(
+        "The app settled the window at a different frame than requested (minimum size or grid snapping).",
+      );
+    }
+    const refreshed = await client.refresh({ signal: call.signal });
+    return completedValue(context, WINDOW_COMMAND_IDS[plan.action], {
+      action: plan.action,
+      window_id: plan.windowId,
+      before,
+      window: mapWindowRow(refreshed, plan.windowId),
+      mutation: normalizeMessage(mutation),
+      warnings,
+    });
+  } catch (error) {
+    throw fail(context, error, "window", call);
+  }
+}
+
+/** `auv_displays`: list the displays the Runner can target. */
+async function displays(context, plan, exec, timeoutMs) {
+  const call = beginCall(exec?.signal, timeoutMs);
+  try {
+    const list = await context.runner.displays.list({ signal: call.signal });
+    return completedValue(context, "display.list", {
+      displays: Array.isArray(list)
+        ? list.map(mapDisplay).filter((display) => display !== null)
+        : [],
+      warnings: [],
+    });
+  } catch (error) {
+    throw fail(context, error, "displays", call);
   }
 }
 
 async function activate(context, plan, exec, timeoutMs) {
-  const call = beginCall(exec?.signal, timeoutMs)
+  const call = beginCall(exec?.signal, timeoutMs);
   try {
-    const response = await context.runner.applications.activate({ applicationId: plan.applicationId }, { signal: call.signal })
-    const warnings = []
-    const warning = activationWarning(response)
-    if (warning !== null) warnings.push(warning)
-    return completedValue(context, 'application.activate', {
+    const response = await context.runner.applications.activate(
+      { applicationId: plan.applicationId },
+      { signal: call.signal },
+    );
+    const warnings = [];
+    const warning = activationWarning(response);
+    if (warning !== null) warnings.push(warning);
+    return completedValue(context, "application.activate", {
       target: `app:${plan.applicationId}`,
       result: mapActivateResult(response),
       warnings,
-    })
+    });
   } catch (error) {
-    throw fail(context, error, 'activate', call)
+    throw fail(context, error, "activate", call);
   }
 }
 
@@ -1641,7 +2280,7 @@ async function activate(context, plan, exec, timeoutMs) {
  * macOS permission probe. Never throws: probe failures become report fields.
  */
 async function doctor(context, exec, timeoutMs) {
-  const call = beginCall(exec?.signal, timeoutMs)
+  const call = beginCall(exec?.signal, timeoutMs);
   const report = {
     platform: process.platform,
     daemon: {
@@ -1649,7 +2288,7 @@ async function doctor(context, exec, timeoutMs) {
       endpoint: context.endpoint,
       daemon_id: context.daemonId,
       pid: context.pid,
-      health: 'unknown',
+      health: "unknown",
     },
     permissions_checked: false,
     accessibility: null,
@@ -1660,38 +2299,48 @@ async function doctor(context, exec, timeoutMs) {
     recommendation: null,
     error: null,
     warnings: [],
-  }
+  };
   try {
-    const health = await context.auv.health.check({ signal: call.signal })
-    report.daemon.health = typeof health?.status === 'string' ? health.status : 'unknown'
-    if (process.platform !== 'darwin') {
-      report.all_ok = true
-      report.warnings.push('Permission checks are macOS-only; the AUV daemon is reachable on this platform.')
-      return report
+    const health = await context.auv.health.check({ signal: call.signal });
+    report.daemon.health =
+      typeof health?.status === "string" ? health.status : "unknown";
+    if (process.platform !== "darwin") {
+      report.all_ok = true;
+      report.warnings.push(
+        "Permission checks are macOS-only; the AUV daemon is reachable on this platform.",
+      );
+      return report;
     }
-    const probe = await context.runner.macos.permissions.probe({ signal: call.signal })
-    const permissions = summarizePermissions(probe)
+    const probe = await context.runner.macos.permissions.probe({
+      signal: call.signal,
+    });
+    const permissions = summarizePermissions(probe);
     if (permissions === null) {
-      report.error = 'AUV returned no permission status.'
-      report.recommendation = PERMISSION_RECOMMENDATION
-      return report
+      report.error = "AUV returned no permission status.";
+      report.recommendation = PERMISSION_RECOMMENDATION;
+      return report;
     }
-    report.permissions_checked = true
-    report.accessibility = permissions.accessibility
-    report.screen_recording = permissions.screen_recording
-    report.screen_capture_kit = permissions.screen_capture_kit
-    report.automation = permissions.automation
-    report.all_ok = permissionsAllOk(permissions)
-    if (!report.all_ok) report.recommendation = PERMISSION_RECOMMENDATION
-    if (permissions.automation === 'missing') {
-      report.warnings.push('Automation to System Events is missing; some apps may refuse AppleScript activation.')
+    report.permissions_checked = true;
+    report.accessibility = permissions.accessibility;
+    report.screen_recording = permissions.screen_recording;
+    report.screen_capture_kit = permissions.screen_capture_kit;
+    report.automation = permissions.automation;
+    report.all_ok = permissionsAllOk(permissions);
+    if (!report.all_ok) report.recommendation = PERMISSION_RECOMMENDATION;
+    if (permissions.automation === "missing") {
+      report.warnings.push(
+        "Automation to System Events is missing; some apps may refuse AppleScript activation.",
+      );
     }
-    return report
+    return report;
   } catch (error) {
-    report.error = mapSdkError(error, 'doctor', call).message
-    report.recommendation = permissionHint(report.error) ?? PERMISSION_RECOMMENDATION
-    report.warnings.push('The permission probe failed; grant macOS permissions to DeepSeek Harness and retry.')
-    return report
+    report.error = mapSdkError(error, "doctor", call).message;
+    report.recommendation =
+      permissionHint(report.error) ?? PERMISSION_RECOMMENDATION;
+    report.warnings.push(
+      "The permission probe failed; grant macOS permissions to DeepSeek Harness and retry.",
+    );
+    return report;
   }
 }
 
@@ -1709,24 +2358,36 @@ function createFacade(shared) {
     endpoint: shared.endpoint,
     daemonId: shared.daemonId,
     pid: shared.pid,
-  }
+  };
   return {
-    kind: 'sdk',
+    kind: "sdk",
     mode: context.mode,
     debug() {
-      return { mode: context.mode, daemonId: context.daemonId, pid: context.pid, endpoint: context.endpoint }
+      return {
+        mode: context.mode,
+        daemonId: context.daemonId,
+        pid: context.pid,
+        endpoint: context.endpoint,
+      };
     },
-    screenshot: (plan, exec, timeoutMs) => screenshot(context, plan, exec, timeoutMs),
+    screenshot: (plan, exec, timeoutMs) =>
+      screenshot(context, plan, exec, timeoutMs),
     ocr: (plan, exec, timeoutMs) => ocr(context, plan, exec, timeoutMs),
     click: (plan, exec, timeoutMs) => click(context, plan, exec, timeoutMs),
     type: (plan, exec, timeoutMs) => type(context, plan, exec, timeoutMs),
     keys: (plan, exec, timeoutMs) => keys(context, plan, exec, timeoutMs),
     scroll: (plan, exec, timeoutMs) => scroll(context, plan, exec, timeoutMs),
     drag: (plan, exec, timeoutMs) => drag(context, plan, exec, timeoutMs),
-    captureState: (plan, exec, timeoutMs) => captureState(context, plan, exec, timeoutMs),
-    waitForChange: (plan, exec, timeoutMs) => waitForChange(context, plan, exec, timeoutMs),
+    captureState: (plan, exec, timeoutMs) =>
+      captureState(context, plan, exec, timeoutMs),
+    waitForChange: (plan, exec, timeoutMs) =>
+      waitForChange(context, plan, exec, timeoutMs),
     windows: (plan, exec, timeoutMs) => windows(context, plan, exec, timeoutMs),
-    activate: (plan, exec, timeoutMs) => activate(context, plan, exec, timeoutMs),
+    window: (plan, exec, timeoutMs) => windowOp(context, plan, exec, timeoutMs),
+    displays: (plan, exec, timeoutMs) =>
+      displays(context, plan, exec, timeoutMs),
+    activate: (plan, exec, timeoutMs) =>
+      activate(context, plan, exec, timeoutMs),
     doctor: (exec, timeoutMs) => doctor(context, exec, timeoutMs),
-  }
+  };
 }

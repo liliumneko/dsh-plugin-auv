@@ -53,7 +53,7 @@ AUV 相关链接：
 https://github.com/liliumneko/dsh-plugin-auv/releases/latest/download/dsh-plugin-auv.tgz
 ```
 
-点安装，然后启用「AUV 桌面自动化」。安装后 12 个 `auv_*` 工具会在下一步模型调用时出现；建议先跑 `auv_doctor`。
+点安装，然后启用「AUV 桌面自动化」。安装后 14 个 `auv_*` 工具会在下一步模型调用时出现；建议先跑 `auv_doctor`。
 
 同一个输入框也接受 npm 包名和本地目录。仓库里不放构建产物，正常安装请用 release tarball；开发构建和发版流程见 [docs/implementation.md](https://github.com/liliumneko/dsh-plugin-auv/blob/main/docs/implementation.md)。
 
@@ -79,15 +79,17 @@ plugin_manager action=install_bundle target=https://github.com/liliumneko/dsh-pl
 | --- | --- | --- |
 | `auv_doctor` | 权限、daemon 状态与整体就绪情况的诊断；缺东西时给出安装/授权提示，不抛错 |
 | `auv_screenshot` | 截全屏、窗口、应用、显示器或屏幕区域，返回 `.webp` 路径供 `read_image` 查看，同时带回 capture 的 bounds、缩放和像素信息 |
-| `auv_ocr` | 在屏幕或窗口里找文字；`wait: true` 会轮询等待。匹配结果带屏幕坐标、窗口坐标和图片像素坐标 |
-| `auv_click` | 点击 OCR 找到的文字，或点击指定坐标；可指定鼠标键、目标和点击区域，`space: "screen"` 对 Unity/Canvas 更可靠 |
-| `auv_type` | 向当前焦点控件输入或粘贴文字 |
-| `auv_keys` | 按一个组合键，可重复；`policy` 和 `focus` 控制投递方式 |
-| `auv_scroll` | 在窗口内滚动，按窗口内坐标 |
+| `auv_ocr` | 在屏幕或窗口里找文字；`mode: "read"` 返回整段文字和 `result.regions` 里所有文字区域，`wait: true` 会轮询等待（仅 find 模式）。目标可以是窗口、应用、`display_id` 或屏幕 `region`，可加 `recognition_languages` 和 `custom_words`。匹配结果和区域带屏幕坐标、窗口坐标和图片像素坐标 |
+| `auv_click` | 点击 OCR 找到的文字，或点击指定坐标；可指定鼠标键、目标、点击区域和坐标空间，`space: "screen"` 对 Unity/Canvas 更可靠。`count` 连点（2 为双击），`modifiers` 加 cmd/shift/ctrl/alt，`window_strategy` 决定窗口点击的投递方式 |
+| `auv_type` | 向当前焦点控件输入或粘贴文字；`submit` 在文字后按 return/search/done/go，`replace_existing` 先选中原来的内容再替换 |
+| `auv_keys` | 按一个组合键，可重复；`hold_ms` 按住指定毫秒再松开（不能和 `repeat` 同用）。`policy` 和 `focus` 控制投递方式 |
+| `auv_scroll` | 在窗口内滚动，按窗口内坐标；`smooth` 平滑滚动，`until_text` 一直滚到该文字出现，两者都需要 `window_id` |
 | `auv_drag` | 从一点拖到另一点，支持屏幕、窗口、显示器坐标，可设鼠标键、时长，并在拖动前聚焦目标 |
 | `auv_capture_state` | 给窗口或区域拍一张内存快照，返回 `state_token`；在操作前调用 |
 | `auv_wait_for_change` | 观察窗口或区域并比较前后画面，返回 `changed` / `no_effect` / `timeout` 和 `changed_ratio`；传 `auv_capture_state` 拿到的 `state_token` 最可靠 |
 | `auv_windows` | 列出窗口的 id、应用 id、标题、位置和状态 |
+| `auv_window` | 对指定 `window_id` 聚焦、最小化、最大化、还原、移动/缩放（`set_frame`）或刷新；返回操作前后的窗口，应用落到不同位置时会警告 |
+| `auv_displays` | 列出显示器的 id、名称、位置、`scale_factor` 以及主屏/内置标记 |
 | `auv_activate` | 把应用带到前台 |
 
 `auv_screenshot` 的 `.webp` 结果需要再调用 DSH 的 `read_image` 查看图像；工具本身不返回图片字节。
@@ -123,8 +125,8 @@ screen_point = window_point + window.frame.origin
 
 `image_pixel` 属于产生这个结果的这次 capture，不一定等于你之前自己截的那张图；`pixel_ratio`
 是 `pixel_size.width / bounds.width`。截图结果带 `bounds`、`origin`、`scale_factor`、
-`pixel_size`、`coordinate_note`；OCR 匹配结果在 `bounds` 之外还有 `screen_point`、
-`image_pixel`、`window_point`、`pixel_ratio`。
+`pixel_size`、`coordinate_note`；OCR 匹配结果和 read 模式的区域在 `bounds` 之外还有
+`screen_point`、`image_pixel`、`window_point`、`pixel_ratio`。
 
 输入工具返回的是“投递证据”，不代表应用真的响应了。验证一次输入：
 
@@ -144,12 +146,17 @@ screen_point = window_point + window.frame.origin
 ```
 auv_doctor {}
 auv_windows {}
+auv_window { "window_id": "<auv_windows 里的 id>", "action": "maximize" }
+auv_displays {}
 auv_screenshot { "window_id": "<auv_windows 里的 id>" }   # 然后用 read_image 打开返回路径
 auv_ocr { "text": "保存" }
+auv_ocr { "mode": "read", "window_id": "<auv_windows 里的 id>" }
 auv_click { "text": "保存", "application_id": "com.apple.TextEdit" }
 auv_type { "text": "hello", "mode": "paste" }
+auv_type { "text": "query", "submit": "return" }
 auv_keys { "keys": ["cmd", "t"], "repeat": 3, "interval_ms": 120 }
 auv_scroll { "window_id": "<id>", "dy": 600 }
+auv_scroll { "window_id": "<auv_windows 里的 id>", "dy": 400, "until_text": "Settings" }
 auv_drag { "from": { "x": 300, "y": 500 }, "to": { "x": 600, "y": 500 }, "duration_ms": 400 }
 auv_capture_state { "window_id": "<id>" }        # 返回 state_token
 auv_drag { "from": { "x": 300, "y": 500 }, "to": { "x": 600, "y": 500 } }
@@ -158,21 +165,14 @@ auv_wait_for_change { "state_token": "<state_token>", "timeout_ms": 3000 }
 
 ## 排障
 
-- **`AUV was not found`**：AUV 没装或不在 `PATH`。错误信息里有安装命令和仓库链接；装好后重启 Harness，再跑 `auv_doctor`。已有 daemon 在跑时，插件不装 AUV 也能连上。
+- **`AUV was not found`**：AUV 没装或不在 `PATH`。错误信息里有安装命令和仓库链接；装好后重启 Harness，再跑 `auv_doctor`。
 - **插件装了但没反应**：先跑 `auv_doctor`。它会说明 AUV 是否找到、能不能连上 daemon、缺哪个 macOS 权限。
 - **连不上 daemon**：看 `auv_doctor` 里的 endpoint 和错误。插件需要在没有可连接 daemon 时自己启动一个的话，确认 `AUV_DSH_SDK_STORE_ROOT` 可写。插件不会替换或停止你自己启动的 daemon。
 - **权限错误**：按 [macOS 权限](#macos-权限) 授权，重启 Harness 后再跑 `auv_doctor`。
 - **OCR 报 `vision OCR failed …`**：缺屏幕录制，或授权还没生效；授权并重启后重试。这期间可以先用 `auv_screenshot` + `read_image`。
 - **`wait: true` 超时**：文字还在加载时，用更短的 `timeout_ms` 重试，比一次等很久更有效。
 - **截图路径读不到**：把返回的绝对路径原样传给 `read_image`。截图是临时文件：每次新截图后会删掉超过 `AUV_DSH_CAPTURE_RETENTION_MS`（默认 1 小时）或超出 `AUV_DSH_CAPTURE_MAX_FILES`（默认 200）的旧图。需要在更长会话里保留截图，就把这两个值调大。
-
-- **按键在 Unity/Canvas 游戏里没反应（Space、Return）**：AUV 会返回 `completed`，但游戏可能忽略这类注入事件（Stacklands 已复现）。改用屏幕坐标点击或 OCR 点击；`changed: false` 只表示画面没变，不代表按键没送达。这是 AUV 上游的驱动限制。
-
-## 状态
-
-已在 macOS 27.2 + AUV 0.0.43 + DeepSeek Harness 上验证。拖拽、屏幕坐标点击和画面变化检测在
-Stacklands 实测可用；`auv_keys` 的按键注入仍无法推进那个 Unity 游戏，这是 AUV 上游驱动的问题。
-构建、发版、设计和验证细节在 [docs/implementation.md](https://github.com/liliumneko/dsh-plugin-auv/blob/main/docs/implementation.md)。
+- **按键在 Unity/Canvas 游戏里没反应（Space、Return）**：AUV 会返回 `completed`，但游戏可能忽略这类注入事件。改用屏幕坐标点击或 OCR 点击；`changed: false` 表示画面没有变化，并非按键问题
 
 ## 版权与许可
 
